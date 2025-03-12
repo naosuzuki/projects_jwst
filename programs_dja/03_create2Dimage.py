@@ -64,13 +64,12 @@ def readtbl(csvfile):
       for j in range(len(rid)):
          prismimgrest[i,rid[j]-1220]=restflux[j]
       
+   
    outputfits='djaprism.fits'
    writeoutimg(prismimg,outputfits)
 
    outputfits='djaprism_rest.fits'
    writeoutimg(prismimgrest,outputfits)
-
-
 
 
 def writeoutimg(image2d,outputfits):
