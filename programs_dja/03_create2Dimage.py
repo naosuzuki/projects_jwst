@@ -46,6 +46,8 @@ def readtbl(csvfile):
       for j in range(len(wavex)-1):
         dlog[j]=logwave[j+1]-logwave[j]
       dlogave=numpy.average(dlog)
+      COEFF0_obs=logwave[0]
+      COEFF1_obs=dlogave
 
 # Flux Normalization
       flux1=numpy.where(numpy.isnan(flux),0.0,flux)
@@ -55,7 +57,9 @@ def readtbl(csvfile):
       flux1/=fluxmed
 
 # Restframe
-      [restwave,restflux,rid]=astrolib.exec_logrebinning_flux_fromlinear(0.0022157,wavex,flux1)
+      COEFF0_rest=0.0022157
+      COEFF1_rest=1220.*COEFF0_rest
+      [restwave,restflux,rid]=astrolib.exec_logrebinning_flux_fromlinear(COEFF0_rest,wavex,flux1)
 
       for j in range(435):
          prismimg[i,j]=flux1[j]
@@ -63,13 +67,35 @@ def readtbl(csvfile):
 
       for j in range(len(rid)):
          prismimgrest[i,rid[j]-1220]=restflux[j]
-      
    
    outputfits='djaprism.fits'
-   writeoutimg(prismimg,outputfits)
+   hdu=fits.PrimaryHDU(data=prismimg)
+   hdul=fits.HDUList([hdu])
+   hdr=hdul[0].header
+   hdu.header['HISTORY']='Writing 2D FITS IMAGE : JWST PRISM'
+   hdu.header['']='Wavelength (Ang) bin in Log, w=10**(coeff0+i*coeff1)'
+   hdu.header['']='by Nao Suzuki on Mar 12th 2025'
+   hdu.header['COEFF0']=COEFF0_obs
+   hdu.header['COEFF1']=COEFF1_obs
+   hdu.writeto(outputfits)
+   del hdu ; del hdul
+#  Original Version
+#   writeoutimg(prismimg,outputfits)
 
    outputfits='djaprism_rest.fits'
-   writeoutimg(prismimgrest,outputfits)
+   hdu=fits.PrimaryHDU(data=prismimgrest)
+   hdul=fits.HDUList([hdu])
+   hdr=hdul[0].header
+   hdu.header['HISTORY']='Writing 2D FITS IMAGE : JWST PRISM'
+   hdu.header['']='Wavelength (Ang) bin in Log, w=10**(coeff0+i*coeff1)'
+   hdu.header['']='by Nao Suzuki on Mar 12th 2025'
+   hdu.header['COEFF0']=COEFF0_rest
+   hdu.header['COEFF1']=COEFF1_rest
+   hdu.writeto(outputfits)
+   del hdu ; del hdul
+   sys.exit(1)
+# Original Version w/o header
+#   writeoutimg(prismimgrest,outputfits)
 
 
 def writeoutimg(image2d,outputfits):
