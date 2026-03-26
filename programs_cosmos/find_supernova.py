@@ -7,9 +7,9 @@ detecting sources independently in each image and cross-matching.
 
 Filename conventions:
     HST:  {ID}_{Field}_hstcosmos.png   (e.g., 783487_B10_hstcosmos.png)
-    JWST: {ID}_{Field}_jwst1.png       (e.g., 783487_B10_jwst1.png)
-          {ID}_{Field}_jwst2.png       (e.g., 783487_B10_jwst2.png)
-    Images are matched by ID + Field name.
+    JWST: {ID}_{Field}_jwst1.png       (e.g., 783487_B4_jwst1.png)
+          {ID}_{Field}_jwst2.png       (e.g., 783487_B4_jwst2.png)
+    Images are matched by object ID (field names may differ between HST/JWST).
     Each HST image is compared against both jwst1 and jwst2 for that object.
 
 HST directory: /data/astrofs2_1/suzuki/data/HST/cosmosacs/original_png/
@@ -169,31 +169,39 @@ def process_object(args):
         if len(candidates) > 0:
             jwst_fname = os.path.basename(jwst_path)
             for x, y, bright in candidates:
-                results.append([obj_key, jwst_fname, x, y, bright])
+                hst_field = files.get("hst_field", "")
+                jwst_field = files.get("jwst_field", "")
+                results.append([obj_key, hst_field, jwst_field, jwst_fname, x, y, bright])
 
     return results
 
 
-def parse_object_key(filename):
-    """Extract the ID_Field key from a filename.
+def parse_filename(filename):
+    """Extract ID and Field from a filename.
 
     Examples:
-        783487_B10_hstcosmos.png  -> 783487_B10
-        483943_B4_jwst1.png       -> 483943_B4
-        483943_B4_jwst2.png       -> 483943_B4
+        783487_B10_hstcosmos.png  -> ("783487", "B10", "hstcosmos")
+        483943_B4_jwst1.png       -> ("483943", "B4", "jwst1")
+        483943_B4_jwst2.png       -> ("483943", "B4", "jwst2")
+
+    Returns:
+        (object_id, field, image_type) or None if parsing fails.
     """
     basename = os.path.splitext(filename)[0]
-    match = re.match(r"^(.+?)_(hstcosmos|jwst[12])$", basename)
+    match = re.match(r"^(.+?)_([^_]+)_(hstcosmos|jwst[12])$", basename)
     if match:
-        return match.group(1)
+        return match.group(1), match.group(2), match.group(3)
     return None
 
 
 def build_file_maps(hst_dir, jwst_dir):
-    """Build mapping from object key to HST and JWST file paths.
+    """Build mapping from object ID to HST and JWST file paths.
+
+    Matches by object ID only (field names may differ between HST and JWST).
 
     Returns:
-        dict: {object_key: {"hst": path, "jwst1": path, "jwst2": path}}
+        dict: {object_id: {"hst": path, "hst_field": str,
+                           "jwst1": path, "jwst2": path, "jwst_field": str}}
     """
     print("Scanning HST directory...")
     hst_files = sorted(glob.glob(os.path.join(hst_dir, "*.png")))
@@ -202,26 +210,26 @@ def build_file_maps(hst_dir, jwst_dir):
 
     print(f"Found {len(hst_files)} HST files, {len(jwst_files)} JWST files")
 
-    print("Building file map...")
+    print("Building file map (matching by object ID)...")
     file_map = {}
 
     for f in hst_files:
-        key = parse_object_key(os.path.basename(f))
-        if key:
-            if key not in file_map:
-                file_map[key] = {}
-            file_map[key]["hst"] = f
+        parsed = parse_filename(os.path.basename(f))
+        if parsed:
+            obj_id, field, _ = parsed
+            if obj_id not in file_map:
+                file_map[obj_id] = {}
+            file_map[obj_id]["hst"] = f
+            file_map[obj_id]["hst_field"] = field
 
     for f in jwst_files:
-        basename = os.path.splitext(os.path.basename(f))[0]
-        key = parse_object_key(os.path.basename(f))
-        if key:
-            if key not in file_map:
-                file_map[key] = {}
-            if basename.endswith("_jwst1"):
-                file_map[key]["jwst1"] = f
-            elif basename.endswith("_jwst2"):
-                file_map[key]["jwst2"] = f
+        parsed = parse_filename(os.path.basename(f))
+        if parsed:
+            obj_id, field, img_type = parsed
+            if obj_id not in file_map:
+                file_map[obj_id] = {}
+            file_map[obj_id][img_type] = f  # "jwst1" or "jwst2"
+            file_map[obj_id]["jwst_field"] = field
 
     return file_map
 
@@ -321,11 +329,12 @@ def main():
     # Save all candidates to CSV
     if all_candidates:
         # Sort by brightness (brightest first)
-        all_candidates.sort(key=lambda r: r[4], reverse=True)
+        all_candidates.sort(key=lambda r: r[6], reverse=True)
 
         with open(args.output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["object_id", "jwst_file", "x", "y", "brightness"])
+            writer.writerow(["object_id", "hst_field", "jwst_field", "jwst_file",
+                             "x", "y", "brightness"])
             writer.writerows(all_candidates)
         print(f"All candidates saved to {args.output_csv}")
         print(f"Total supernova candidates: {len(all_candidates)}")
