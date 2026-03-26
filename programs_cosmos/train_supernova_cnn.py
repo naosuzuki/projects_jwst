@@ -580,116 +580,112 @@ def main():
         print(f"  All {len(recovered)} known supernovae RECOVERED!")
 
     # ==================================================================
-    # STEP 4: Apply to entire dataset
+    # STEP 4: Apply to entire dataset — write candidates immediately
     # ==================================================================
     print("\n" + "="*60)
     print(f"STEP 4: Applying CNN to all {len(paired)} objects")
+    print(f"  Candidates written to {args.output_csv} as they are found")
     print("="*60)
 
+    all_probs_csv = args.output_csv.replace(".csv", "_all_probs.csv")
+
     start_time = time.time()
-    all_results = []  # Store ALL probabilities for threshold analysis
+    num_candidates = 0
+    num_known_found = 0
     completed = 0
     total = len(paired)
 
-    for obj_id in sorted(paired.keys()):
-        files = paired[obj_id]
-        prob = predict_object(model, files["hst"], files["jwst1"], files["jwst2"], device)
-        all_results.append((obj_id, prob))
+    # Open both CSV files and write headers — candidates are flushed immediately
+    csv_file = open(args.output_csv, "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(["object_id", "probability", "known_sn"])
 
-        completed += 1
-        if completed % 5000 == 0 or completed == total:
-            elapsed = time.time() - start_time
-            rate = completed / elapsed if elapsed > 0 else 0
-            eta = (total - completed) / rate if rate > 0 else 0
-            above = sum(1 for _, p in all_results if p >= threshold)
-            print(f"  Progress: {completed}/{total} ({completed/total*100:.1f}%) "
-                  f"| {rate:.0f} obj/s | ETA: {eta:.0f}s "
-                  f"| Candidates: {above}")
+    all_probs_file = open(all_probs_csv, "w", newline="")
+    all_probs_writer = csv.writer(all_probs_file)
+    all_probs_writer.writerow(["object_id", "probability", "known_sn"])
+
+    try:
+        for obj_id in sorted(paired.keys()):
+            files = paired[obj_id]
+            prob = predict_object(
+                model, files["hst"], files["jwst1"], files["jwst2"], device)
+
+            is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
+
+            # Write ALL probabilities to the full file
+            all_probs_writer.writerow([obj_id, f"{prob:.6f}", is_known])
+
+            # Write candidate immediately if above threshold
+            if prob >= threshold:
+                csv_writer.writerow([obj_id, f"{prob:.4f}", is_known])
+                csv_file.flush()  # Flush so it's visible immediately
+                num_candidates += 1
+
+                tag = "KNOWN" if is_known == "YES" else "NEW"
+                print(f"  *** SN CANDIDATE: {obj_id} (prob={prob:.4f}) [{tag}] ***")
+
+                if is_known == "YES":
+                    num_known_found += 1
+
+            completed += 1
+            if completed % 5000 == 0 or completed == total:
+                elapsed = time.time() - start_time
+                rate = completed / elapsed if elapsed > 0 else 0
+                eta = (total - completed) / rate if rate > 0 else 0
+                all_probs_file.flush()
+                print(f"  Progress: {completed}/{total} ({completed/total*100:.1f}%) "
+                      f"| {rate:.0f} obj/s | ETA: {eta:.0f}s "
+                      f"| Candidates: {num_candidates}")
+    finally:
+        csv_file.close()
+        all_probs_file.close()
 
     elapsed = time.time() - start_time
     print(f"\nInference complete in {elapsed:.1f}s")
 
     # ==================================================================
-    # STEP 5: Final verification and output
+    # STEP 5: Final verification
     # ==================================================================
     print("\n" + "="*60)
-    print("STEP 5: Final verification and results")
+    print("STEP 5: Final verification")
     print("="*60)
 
-    # Filter candidates above threshold
-    candidates = [(obj_id, prob) for obj_id, prob in all_results if prob >= threshold]
-    candidates.sort(key=lambda x: x[1], reverse=True)
+    # Re-read candidates to do final checks
+    candidate_ids = set()
+    with open(args.output_csv, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            candidate_ids.add(row["object_id"])
 
-    detection_rate = len(candidates) / total * 1000 if total > 0 else 0
-    print(f"\nDetection rate: {len(candidates)}/{total} = "
-          f"{detection_rate:.1f} per 1000 objects")
-
-    # Warn if rate is too high
-    if detection_rate > 5:
-        print(f"WARNING: Detection rate ({detection_rate:.1f}/1000) is higher than "
-              f"expected (~1/1000). Consider raising threshold.")
-        # Suggest a threshold that would give ~1/1000 rate
-        all_probs = sorted([p for _, p in all_results], reverse=True)
-        target_n = max(1, total // 1000)
-        if target_n < len(all_probs):
-            suggested_threshold = all_probs[target_n]
-            # But never set it above the lowest known SN
-            if suggested_threshold < min_known_prob:
-                print(f"  Suggested threshold for ~1/1000 rate: {suggested_threshold:.4f}")
-            else:
-                print(f"  Cannot reduce to 1/1000 without losing known SN. "
-                      f"Keeping threshold={threshold:.4f}")
-
-    # Final check: are all known SN in the candidate list?
-    candidate_ids = set(obj_id for obj_id, _ in candidates)
-    known_recovered = KNOWN_SUPERNOVAE_SET & candidate_ids & set(known_sn_objects.keys())
     known_in_data = set(known_sn_objects.keys())
+    known_recovered = known_in_data & candidate_ids
     known_missed = known_in_data - candidate_ids
+
+    detection_rate = len(candidate_ids) / total * 1000 if total > 0 else 0
 
     print(f"\n--- Final Known SN Check ---")
     print(f"Known SN in dataset: {len(known_in_data)}")
     print(f"Known SN recovered:  {len(known_recovered)}/{len(known_in_data)}")
     if known_recovered:
         for obj_id in sorted(known_recovered):
-            prob = dict(all_results).get(obj_id, 0)
-            print(f"  FOUND: {obj_id} (prob={prob:.4f})")
+            print(f"  FOUND: {obj_id}")
     if known_missed:
         print(f"MISSED known SN:")
         for obj_id in sorted(known_missed):
-            prob = dict(all_results).get(obj_id, 0)
-            print(f"  MISSED: {obj_id} (prob={prob:.4f})")
+            print(f"  MISSED: {obj_id}")
 
-    new_candidates = [(obj_id, prob) for obj_id, prob in candidates
-                      if obj_id not in KNOWN_SUPERNOVAE_SET]
-    print(f"\nNew supernova candidates: {len(new_candidates)}")
-    if new_candidates:
-        print(f"Top 20 new candidates:")
-        for obj_id, prob in new_candidates[:20]:
-            print(f"  {obj_id}: {prob:.4f}")
-
-    # Save results
-    with open(args.output_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["object_id", "probability", "known_sn"])
-        for obj_id, prob in candidates:
-            is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
-            writer.writerow([obj_id, f"{prob:.4f}", is_known])
-
-    print(f"\nResults saved to {args.output_csv}")
-    print(f"Total candidates: {len(candidates)} "
-          f"(known: {len(known_recovered)}, new: {len(new_candidates)})")
+    new_count = len(candidate_ids) - len(known_recovered)
+    print(f"\nTotal candidates: {len(candidate_ids)} "
+          f"(known: {len(known_recovered)}, new: {new_count})")
     print(f"Threshold used: {threshold:.4f}")
     print(f"Detection rate: {detection_rate:.1f} per 1000 objects")
 
-    # Save all probabilities for analysis
-    all_probs_csv = args.output_csv.replace(".csv", "_all_probs.csv")
-    with open(all_probs_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["object_id", "probability", "known_sn"])
-        for obj_id, prob in sorted(all_results, key=lambda x: x[1], reverse=True):
-            is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
-            writer.writerow([obj_id, f"{prob:.6f}", is_known])
-    print(f"All probabilities saved to {all_probs_csv}")
+    if detection_rate > 5:
+        print(f"WARNING: Detection rate ({detection_rate:.1f}/1000) is higher than "
+              f"expected (~1/1000). Consider raising threshold.")
+
+    print(f"\nCandidate file: {args.output_csv} (check anytime, even while running)")
+    print(f"All probabilities: {all_probs_csv}")
 
 
 if __name__ == "__main__":
