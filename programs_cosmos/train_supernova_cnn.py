@@ -378,6 +378,52 @@ def predict_object(model, hst_path, jwst1_path, jwst2_path, device):
     return prob
 
 
+def load_triplet(args):
+    """Worker function: load and crop 3 images for one object.
+
+    Args:
+        (obj_id, hst_path, jwst1_path, jwst2_path)
+
+    Returns:
+        (obj_id, triplet_array) or (obj_id, None) if loading fails.
+    """
+    obj_id, hst_path, jwst1_path, jwst2_path = args
+    hst_img = load_and_crop_center(hst_path)
+    jwst1_img = load_and_crop_center(jwst1_path)
+    jwst2_img = load_and_crop_center(jwst2_path)
+
+    if hst_img is None or jwst1_img is None or jwst2_img is None:
+        return (obj_id, None)
+
+    triplet = np.stack([hst_img, jwst1_img, jwst2_img], axis=0)
+    return (obj_id, triplet)
+
+
+class InferenceDataset(Dataset):
+    """Dataset for batched inference over all objects."""
+
+    def __init__(self, obj_ids, file_map):
+        self.obj_ids = obj_ids
+        self.file_map = file_map
+
+    def __len__(self):
+        return len(self.obj_ids)
+
+    def __getitem__(self, idx):
+        obj_id = self.obj_ids[idx]
+        files = self.file_map[obj_id]
+
+        hst_img = load_and_crop_center(files["hst"])
+        jwst1_img = load_and_crop_center(files["jwst1"])
+        jwst2_img = load_and_crop_center(files["jwst2"])
+
+        if hst_img is None or jwst1_img is None or jwst2_img is None:
+            return obj_id, torch.zeros(NUM_CHANNELS, IMAGE_SIZE, IMAGE_SIZE), False
+
+        triplet = np.stack([hst_img, jwst1_img, jwst2_img], axis=0)
+        return obj_id, torch.tensor(triplet, dtype=torch.float32), True
+
+
 def predict_known_sn(model, known_sn_objects, device):
     """Predict probabilities for all known supernovae. Returns dict {id: prob}."""
     results = {}
@@ -419,6 +465,10 @@ def main():
                         help="Path to save trained model")
     parser.add_argument("--output-csv", default="supernova_cnn_candidates.csv",
                         help="Output CSV file")
+    parser.add_argument("--inference-workers", type=int, default=8,
+                        help="Parallel workers for image loading during inference (default: 8)")
+    parser.add_argument("--inference-batch-size", type=int, default=256,
+                        help="Batch size for inference (default: 256)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -586,14 +636,36 @@ def main():
         print(f"  All {len(recovered)} known supernovae RECOVERED!")
 
     # ==================================================================
-    # STEP 4: Apply to entire dataset — write candidates immediately
+    # STEP 4: Apply to entire dataset — batched + multiprocessor
     # ==================================================================
     print("\n" + "="*60)
     print(f"STEP 4: Applying CNN to all {len(paired)} objects")
+    print(f"  Inference batch size: {args.inference_batch_size}")
+    print(f"  Image loading workers: {args.inference_workers}")
     print(f"  Candidates written to {args.output_csv} as they are found")
     print("="*60)
 
     all_probs_csv = args.output_csv.replace(".csv", "_all_probs.csv")
+
+    # Build inference dataset with multiprocessing DataLoader
+    obj_ids_sorted = sorted(paired.keys())
+    inference_dataset = InferenceDataset(obj_ids_sorted, paired)
+
+    def collate_fn(batch):
+        """Custom collate: separate obj_ids from tensors."""
+        obj_ids = [b[0] for b in batch]
+        tensors = torch.stack([b[1] for b in batch])
+        valid = [b[2] for b in batch]
+        return obj_ids, tensors, valid
+
+    inference_loader = DataLoader(
+        inference_dataset,
+        batch_size=args.inference_batch_size,
+        shuffle=False,
+        num_workers=args.inference_workers,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
 
     start_time = time.time()
     num_candidates = 0
@@ -601,7 +673,7 @@ def main():
     completed = 0
     total = len(paired)
 
-    # Open both CSV files and write headers — candidates are flushed immediately
+    # Open both CSV files — candidates are flushed immediately
     csv_file = open(args.output_csv, "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(["object_id", "probability", "known_sn"])
@@ -610,38 +682,45 @@ def main():
     all_probs_writer = csv.writer(all_probs_file)
     all_probs_writer.writerow(["object_id", "probability", "known_sn"])
 
+    model.eval()
     try:
-        for obj_id in sorted(paired.keys()):
-            files = paired[obj_id]
-            prob = predict_object(
-                model, files["hst"], files["jwst1"], files["jwst2"], device)
+        with torch.no_grad():
+            for batch_obj_ids, batch_tensors, batch_valid in inference_loader:
+                batch_tensors = batch_tensors.to(device)
 
-            is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
+                # Forward pass on entire batch at once
+                outputs = torch.sigmoid(model(batch_tensors)).cpu().numpy()
 
-            # Write ALL probabilities to the full file
-            all_probs_writer.writerow([obj_id, f"{prob:.6f}", is_known])
+                for i, obj_id in enumerate(batch_obj_ids):
+                    prob = float(outputs[i]) if batch_valid[i] else 0.0
+                    is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
 
-            # Write candidate immediately if above threshold
-            if prob >= threshold:
-                csv_writer.writerow([obj_id, f"{prob:.4f}", is_known])
-                csv_file.flush()  # Flush so it's visible immediately
-                num_candidates += 1
+                    # Write ALL probabilities
+                    all_probs_writer.writerow([obj_id, f"{prob:.6f}", is_known])
 
-                tag = "KNOWN" if is_known == "YES" else "NEW"
-                print(f"  *** SN CANDIDATE: {obj_id} (prob={prob:.4f}) [{tag}] ***")
+                    # Write candidate immediately if above threshold
+                    if prob >= threshold:
+                        csv_writer.writerow([obj_id, f"{prob:.4f}", is_known])
+                        csv_file.flush()
+                        num_candidates += 1
 
-                if is_known == "YES":
-                    num_known_found += 1
+                        tag = "KNOWN" if is_known == "YES" else "NEW"
+                        print(f"  *** SN CANDIDATE: {obj_id} "
+                              f"(prob={prob:.4f}) [{tag}] ***")
 
-            completed += 1
-            if completed % 5000 == 0 or completed == total:
-                elapsed = time.time() - start_time
-                rate = completed / elapsed if elapsed > 0 else 0
-                eta = (total - completed) / rate if rate > 0 else 0
-                all_probs_file.flush()
-                print(f"  Progress: {completed}/{total} ({completed/total*100:.1f}%) "
-                      f"| {rate:.0f} obj/s | ETA: {eta:.0f}s "
-                      f"| Candidates: {num_candidates}")
+                        if is_known == "YES":
+                            num_known_found += 1
+
+                completed += len(batch_obj_ids)
+                if completed % 5000 < args.inference_batch_size or completed == total:
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    eta = (total - completed) / rate if rate > 0 else 0
+                    all_probs_file.flush()
+                    print(f"  Progress: {completed}/{total} "
+                          f"({completed/total*100:.1f}%) "
+                          f"| {rate:.0f} obj/s | ETA: {eta:.0f}s "
+                          f"| Candidates: {num_candidates}")
     finally:
         csv_file.close()
         all_probs_file.close()
