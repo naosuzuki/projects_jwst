@@ -17,6 +17,7 @@ JWST directory: /data/astrofs2_1/suzuki/data/JWST/cosmosweb/v0.8_png
 
 Usage:
     python find_supernova.py [options]
+    python find_supernova.py --num-workers 16 --output-dir results/
 """
 
 import argparse
@@ -24,6 +25,8 @@ import csv
 import glob
 import os
 import re
+import time
+from multiprocessing import Pool, cpu_count
 
 import cv2
 import numpy as np
@@ -42,15 +45,13 @@ def load_image(filepath):
     return gray.astype(np.float64)
 
 
-def detect_sources(image, num_features=5000):
+def detect_sources(image):
     """Detect bright point sources using blob detection.
 
     Returns array of (x, y, brightness) for each detected source.
     """
-    # Normalize to 8-bit for detection
     img_8bit = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    # Blob detector tuned for star-like sources
     params = cv2.SimpleBlobDetector_Params()
     params.minThreshold = 30
     params.maxThreshold = 255
@@ -76,7 +77,6 @@ def detect_sources(image, num_features=5000):
     for kp in keypoints:
         x, y = kp.pt
         ix, iy = int(round(x)), int(round(y))
-        # Measure brightness in a small aperture
         y_lo = max(0, iy - 2)
         y_hi = min(image.shape[0], iy + 3)
         x_lo = max(0, ix - 2)
@@ -88,16 +88,7 @@ def detect_sources(image, num_features=5000):
 
 
 def find_new_sources(jwst_sources, hst_sources, match_radius=10.0):
-    """Find JWST sources with no HST counterpart within match_radius pixels.
-
-    Args:
-        jwst_sources: Nx3 array (x, y, brightness) from JWST image.
-        hst_sources: Mx3 array (x, y, brightness) from HST image.
-        match_radius: Maximum distance in pixels to consider a match.
-
-    Returns:
-        Array of unmatched JWST sources (supernova candidates).
-    """
+    """Find JWST sources with no HST counterpart within match_radius pixels."""
     if len(jwst_sources) == 0:
         return np.empty((0, 3))
     if len(hst_sources) == 0:
@@ -106,7 +97,6 @@ def find_new_sources(jwst_sources, hst_sources, match_radius=10.0):
     hst_tree = cKDTree(hst_sources[:, :2])
     distances, _ = hst_tree.query(jwst_sources[:, :2])
 
-    # Sources in JWST with no nearby HST counterpart
     unmatched = distances > match_radius
     return jwst_sources[unmatched]
 
@@ -123,44 +113,65 @@ def save_candidates_image(image, candidates, output_path):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
     cv2.imwrite(output_path, img_color)
-    print(f"Annotated image saved to {output_path}")
 
 
 def process_pair(hst_path, jwst_path, match_radius, min_brightness, output_dir):
-    """Process a single HST/JWST image pair."""
-    basename = os.path.splitext(os.path.basename(jwst_path))[0]
-    print(f"\nProcessing: {basename}")
+    """Process a single HST/JWST image pair. Returns list of candidate tuples."""
+    try:
+        hst_data = load_image(hst_path)
+        jwst_data = load_image(jwst_path)
 
-    hst_data = load_image(hst_path)
-    jwst_data = load_image(jwst_path)
-    print(f"  HST shape: {hst_data.shape}, JWST shape: {jwst_data.shape}")
+        hst_sources = detect_sources(hst_data)
+        jwst_sources = detect_sources(jwst_data)
 
-    hst_sources = detect_sources(hst_data)
-    jwst_sources = detect_sources(jwst_data)
-    print(f"  HST sources: {len(hst_sources)}, JWST sources: {len(jwst_sources)}")
+        candidates = find_new_sources(jwst_sources, hst_sources, match_radius)
 
-    candidates = find_new_sources(jwst_sources, hst_sources, match_radius)
+        if len(candidates) > 0 and min_brightness > 0:
+            candidates = candidates[candidates[:, 2] >= min_brightness]
 
-    # Filter by minimum brightness
-    if len(candidates) > 0 and min_brightness > 0:
-        candidates = candidates[candidates[:, 2] >= min_brightness]
+        if len(candidates) > 0:
+            candidates = candidates[candidates[:, 2].argsort()[::-1]]
 
-    # Sort by brightness (brightest first)
-    if len(candidates) > 0:
-        candidates = candidates[candidates[:, 2].argsort()[::-1]]
-
-    print(f"  Supernova candidates: {len(candidates)}")
-
-    if len(candidates) > 0:
-        for i, (x, y, bright) in enumerate(candidates):
-            print(f"    #{i+1}: x={x:.1f}, y={y:.1f}, brightness={bright:.1f}")
-
-        # Save annotated image
-        if output_dir:
+        if len(candidates) > 0 and output_dir:
+            basename = os.path.splitext(os.path.basename(jwst_path))[0]
             out_path = os.path.join(output_dir, f"{basename}_candidates.png")
             save_candidates_image(jwst_data, candidates, out_path)
 
-    return candidates
+        return candidates
+    except Exception as e:
+        print(f"  Error processing {os.path.basename(jwst_path)}: {e}")
+        return np.empty((0, 3))
+
+
+def process_object(args):
+    """Worker function for multiprocessing. Processes one object (HST vs JWST1/JWST2).
+
+    Args:
+        tuple: (obj_key, files_dict, match_radius, min_brightness, output_dir)
+
+    Returns:
+        list of [obj_key, jwst_filename, x, y, brightness] rows
+    """
+    obj_key, files, match_radius, min_brightness, output_dir = args
+    results = []
+
+    hst_path = files["hst"]
+
+    for jwst_key in ["jwst1", "jwst2"]:
+        if jwst_key not in files:
+            continue
+        jwst_path = files[jwst_key]
+
+        candidates = process_pair(
+            hst_path, jwst_path,
+            match_radius, min_brightness, output_dir
+        )
+        if len(candidates) > 0:
+            jwst_fname = os.path.basename(jwst_path)
+            for x, y, bright in candidates:
+                results.append([obj_key, jwst_fname, x, y, bright])
+
+    return results
 
 
 def parse_object_key(filename):
@@ -172,7 +183,6 @@ def parse_object_key(filename):
         483943_B4_jwst2.png       -> 483943_B4
     """
     basename = os.path.splitext(filename)[0]
-    # Match ID_Field prefix (everything before _hstcosmos, _jwst1, or _jwst2)
     match = re.match(r"^(.+?)_(hstcosmos|jwst[12])$", basename)
     if match:
         return match.group(1)
@@ -185,11 +195,14 @@ def build_file_maps(hst_dir, jwst_dir):
     Returns:
         dict: {object_key: {"hst": path, "jwst1": path, "jwst2": path}}
     """
+    print("Scanning HST directory...")
     hst_files = sorted(glob.glob(os.path.join(hst_dir, "*.png")))
+    print("Scanning JWST directory...")
     jwst_files = sorted(glob.glob(os.path.join(jwst_dir, "*.png")))
 
     print(f"Found {len(hst_files)} HST files, {len(jwst_files)} JWST files")
 
+    print("Building file map...")
     file_map = {}
 
     for f in hst_files:
@@ -244,10 +257,17 @@ def main():
         "--output-csv", default="supernova_candidates.csv",
         help="Output CSV file (default: supernova_candidates.csv)"
     )
+    parser.add_argument(
+        "--num-workers", type=int, default=None,
+        help="Number of parallel workers (default: CPU count)"
+    )
     args = parser.parse_args()
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
+
+    num_workers = args.num_workers or cpu_count()
+    print(f"Using {num_workers} parallel workers")
 
     # Build file mapping by object key (ID_Field)
     file_map = build_file_maps(args.hst_dir, args.jwst_dir)
@@ -255,44 +275,59 @@ def main():
     # Filter to objects that have both HST and at least one JWST image
     paired = {k: v for k, v in file_map.items()
               if "hst" in v and ("jwst1" in v or "jwst2" in v)}
+
+    hst_only = sum(1 for v in file_map.values()
+                   if "hst" in v and "jwst1" not in v and "jwst2" not in v)
+    jwst_only = sum(1 for v in file_map.values()
+                    if "hst" not in v and ("jwst1" in v or "jwst2" in v))
     print(f"Matched {len(paired)} objects with both HST and JWST images")
+    print(f"HST-only (skipped): {hst_only}, JWST-only (skipped): {jwst_only}")
 
     if len(paired) == 0:
-        # Show examples to help debug naming
         hst_examples = sorted(glob.glob(os.path.join(args.hst_dir, "*.png")))[:5]
         jwst_examples = sorted(glob.glob(os.path.join(args.jwst_dir, "*.png")))[:5]
         print(f"\nHST examples: {[os.path.basename(f) for f in hst_examples]}")
         print(f"JWST examples: {[os.path.basename(f) for f in jwst_examples]}")
         return
 
+    # Prepare work items for multiprocessing
+    work_items = [
+        (obj_key, paired[obj_key], args.match_radius, args.min_brightness, args.output_dir)
+        for obj_key in sorted(paired.keys())
+    ]
+
+    # Process in parallel
+    start_time = time.time()
     all_candidates = []
+    completed = 0
+    total = len(work_items)
 
-    for obj_key in sorted(paired.keys()):
-        files = paired[obj_key]
-        hst_path = files["hst"]
+    with Pool(processes=num_workers) as pool:
+        for results in pool.imap_unordered(process_object, work_items, chunksize=100):
+            all_candidates.extend(results)
+            completed += 1
+            if completed % 1000 == 0 or completed == total:
+                elapsed = time.time() - start_time
+                rate = completed / elapsed
+                eta = (total - completed) / rate if rate > 0 else 0
+                print(f"  Progress: {completed}/{total} objects "
+                      f"({completed/total*100:.1f}%) "
+                      f"| {rate:.0f} obj/s | ETA: {eta:.0f}s "
+                      f"| Candidates so far: {len(all_candidates)}")
 
-        # Compare HST against each available JWST filter image
-        for jwst_key in ["jwst1", "jwst2"]:
-            if jwst_key not in files:
-                continue
-            jwst_path = files[jwst_key]
-
-            candidates = process_pair(
-                hst_path, jwst_path,
-                args.match_radius, args.min_brightness, args.output_dir
-            )
-            if len(candidates) > 0:
-                jwst_fname = os.path.basename(jwst_path)
-                for x, y, bright in candidates:
-                    all_candidates.append([obj_key, jwst_fname, x, y, bright])
+    elapsed = time.time() - start_time
+    print(f"\nProcessing complete in {elapsed:.1f}s")
 
     # Save all candidates to CSV
     if all_candidates:
+        # Sort by brightness (brightest first)
+        all_candidates.sort(key=lambda r: r[4], reverse=True)
+
         with open(args.output_csv, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["object_id", "jwst_file", "x", "y", "brightness"])
             writer.writerows(all_candidates)
-        print(f"\nAll candidates saved to {args.output_csv}")
+        print(f"All candidates saved to {args.output_csv}")
         print(f"Total supernova candidates: {len(all_candidates)}")
     else:
         print("\nNo supernova candidates found.")
