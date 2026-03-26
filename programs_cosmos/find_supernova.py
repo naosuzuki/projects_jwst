@@ -209,9 +209,10 @@ def process_object(args):
         jwst_field = files.get("jwst_field", "")
 
         # Galaxy is at center of each PNG cutout.
-        # Real SN only occurs near the host galaxy, so filter candidates
-        # to within 30% of image center.
-        def filter_near_center(sources, image_shape, max_frac=0.3):
+        # Real SN only occurs near the host galaxy, so only keep
+        # candidates within the central 25% radius of the image.
+        def filter_near_galaxy(sources, image_shape, max_frac=0.25):
+            """Keep only sources near the central galaxy."""
             if len(sources) == 0:
                 return sources
             h, w = image_shape
@@ -235,7 +236,7 @@ def process_object(args):
 
             # SN must be near host galaxy (image center)
             if len(candidates) > 0:
-                candidates = filter_near_center(candidates, jwst1_data.shape)
+                candidates = filter_near_galaxy(candidates, jwst1_data.shape)
             if len(candidates) > 0 and min_brightness > 0:
                 candidates = candidates[candidates[:, 2] >= min_brightness]
             if len(candidates) > 0:
@@ -266,7 +267,7 @@ def process_object(args):
 
             # SN must be near host galaxy (image center)
             if len(hst_candidates) > 0:
-                hst_candidates = filter_near_center(hst_candidates, hst_data.shape)
+                hst_candidates = filter_near_galaxy(hst_candidates, hst_data.shape)
             if len(hst_candidates) > 0 and min_brightness > 0:
                 hst_candidates = hst_candidates[hst_candidates[:, 2] >= min_brightness]
             if len(hst_candidates) > 0:

@@ -1,10 +1,14 @@
 """
-Train a CNN to Detect Supernovae by Comparing JWST and HST PNG Images
+Train a CNN to Detect Supernovae Near Host Galaxies
+
+Each PNG has a galaxy at the center. Supernovae appear as new point
+sources near the host galaxy. The CNN focuses on the central galaxy
+region by cropping the central 50% of each image before analysis.
 
 Pipeline:
     Step 1: Load data — match HST/JWST1/JWST2 triplets by object ID
-    Step 2: Train — use 23 known SN + artificial SN as positives,
-            real non-SN objects as negatives (1:1000 rate)
+    Step 2: Train — use 23 known SN + artificial SN (placed near galaxy)
+            as positives, real non-SN objects as negatives
     Step 3: Validate — verify ALL 23 known SN are recovered.
             If not, lower threshold until all are found.
     Step 4: Apply — run trained model on entire dataset
@@ -100,6 +104,44 @@ def load_and_resize(filepath, size=IMAGE_SIZE):
     return img.astype(np.float32) / 255.0
 
 
+def crop_center(image, crop_frac=0.5):
+    """Crop the central region of an image.
+
+    The galaxy is at the center of each PNG. Cropping focuses the CNN
+    on the galaxy and its immediate surroundings, removing irrelevant
+    background at the edges.
+
+    Args:
+        image: 2D float32 array
+        crop_frac: fraction of image to keep (0.5 = central 50%)
+
+    Returns:
+        Cropped image resized back to IMAGE_SIZE.
+    """
+    h, w = image.shape
+    ch, cw = int(h * crop_frac), int(w * crop_frac)
+    y0 = (h - ch) // 2
+    x0 = (w - cw) // 2
+    cropped = image[y0:y0+ch, x0:x0+cw]
+    return cv2.resize(cropped, (IMAGE_SIZE, IMAGE_SIZE),
+                      interpolation=cv2.INTER_AREA)
+
+
+def load_and_crop_center(filepath, size=IMAGE_SIZE, crop_frac=0.5):
+    """Load PNG, crop central galaxy region, resize, normalize."""
+    img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    # Crop center first (galaxy region), then resize
+    h, w = img.shape
+    ch, cw = int(h * crop_frac), int(w * crop_frac)
+    y0 = (h - ch) // 2
+    x0 = (w - cw) // 2
+    cropped = img[y0:y0+ch, x0:x0+cw]
+    cropped = cv2.resize(cropped, (size, size), interpolation=cv2.INTER_AREA)
+    return cropped.astype(np.float32) / 255.0
+
+
 # ============================================================
 # Artificial supernova injection
 # ============================================================
@@ -113,19 +155,11 @@ def inject_supernova_at(image, x, y, peak, sigma):
     return np.clip(img + gaussian, 0, 1).astype(np.float32)
 
 
-def random_position_near_center(h, w, max_offset_frac=0.3):
-    """Generate a random position near the image center.
+def random_position_near_center(h, w, max_offset_frac=0.25):
+    """Generate a random position near the image center (host galaxy).
 
-    The galaxy is always at the center of the PNG cutout.
-    A real supernova occurs near its host galaxy, so we place
-    artificial SN within max_offset_frac of the center.
-
-    Args:
-        h, w: image height and width
-        max_offset_frac: maximum offset from center as fraction of image size
-
-    Returns:
-        (x, y) position near center
+    After center-cropping, the galaxy fills most of the image.
+    SN is placed within 25% of center — right on or next to the galaxy.
     """
     cx, cy = w // 2, h // 2
     max_dx = int(w * max_offset_frac)
@@ -175,9 +209,9 @@ class SupernovaDataset(Dataset):
     def __getitem__(self, idx):
         hst_path, jwst1_path, jwst2_path, label = self.samples[idx]
 
-        hst_img = load_and_resize(hst_path)
-        jwst1_img = load_and_resize(jwst1_path)
-        jwst2_img = load_and_resize(jwst2_path)
+        hst_img = load_and_crop_center(hst_path)
+        jwst1_img = load_and_crop_center(jwst1_path)
+        jwst2_img = load_and_crop_center(jwst2_path)
 
         if hst_img is None or jwst1_img is None or jwst2_img is None:
             return torch.zeros(NUM_CHANNELS, IMAGE_SIZE, IMAGE_SIZE), torch.tensor(0.0)
