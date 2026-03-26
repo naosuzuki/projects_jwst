@@ -28,6 +28,15 @@ import re
 import time
 from multiprocessing import Pool, cpu_count
 
+# 23 confirmed supernovae identified by visual inspection
+KNOWN_SUPERNOVAE = [
+    "471959", "53669", "296673", "296868", "318858", "320233",
+    "9748", "53669", "52864", "407613", "239246", "239875",
+    "245766", "468896", "469221", "120035", "63919", "78323",
+    "25141", "25283", "27350", "435613", "435768",
+]
+KNOWN_SUPERNOVAE_SET = set(KNOWN_SUPERNOVAE)
+
 import cv2
 import numpy as np
 from scipy.spatial import cKDTree
@@ -340,6 +349,22 @@ def main():
         print(f"Total supernova candidates: {len(all_candidates)}")
     else:
         print("\nNo supernova candidates found.")
+
+    # Validation against known supernovae
+    detected_ids = set(r[0] for r in all_candidates)
+    recovered = KNOWN_SUPERNOVAE_SET & detected_ids
+    missed = KNOWN_SUPERNOVAE_SET - detected_ids
+    false_positives = detected_ids - KNOWN_SUPERNOVAE_SET
+
+    print(f"\n--- Validation against {len(KNOWN_SUPERNOVAE_SET)} known supernovae ---")
+    print(f"Recovered: {len(recovered)}/{len(KNOWN_SUPERNOVAE_SET)} "
+          f"({len(recovered)/len(KNOWN_SUPERNOVAE_SET)*100:.1f}%)")
+    if recovered:
+        print(f"  IDs: {sorted(recovered)}")
+    print(f"Missed: {len(missed)}/{len(KNOWN_SUPERNOVAE_SET)}")
+    if missed:
+        print(f"  IDs: {sorted(missed)}")
+    print(f"New candidates (not in known list): {len(false_positives)}")
 
 
 if __name__ == "__main__":
