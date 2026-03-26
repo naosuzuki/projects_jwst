@@ -39,6 +39,7 @@ KNOWN_SUPERNOVAE = [
 KNOWN_SUPERNOVAE_SET = set(KNOWN_SUPERNOVAE)
 
 IMAGE_SIZE = 64  # Resize all images to 64x64
+NUM_CHANNELS = 3  # HST, JWST1, JWST2
 
 
 # --- Data loading and file matching ---
@@ -121,17 +122,28 @@ def add_artificial_supernova(image, num_sn=1):
 
 # --- Dataset ---
 
-class SupernovaDataset(Dataset):
-    """Dataset of (HST, JWST) image pairs with supernova labels.
+def augment_images(images):
+    """Apply random flips and rotation to a list of images consistently."""
+    if random.random() > 0.5:
+        images = [np.fliplr(img).copy() for img in images]
+    if random.random() > 0.5:
+        images = [np.flipud(img).copy() for img in images]
+    k = random.randint(0, 3)
+    images = [np.rot90(img, k).copy() for img in images]
+    return images
 
-    Each sample is a 2-channel image: channel 0 = HST, channel 1 = JWST.
+
+class SupernovaDataset(Dataset):
+    """Dataset of (HST, JWST1, JWST2) image triplets with supernova labels.
+
+    Each sample is a 3-channel image: channel 0 = HST, channel 1 = JWST1, channel 2 = JWST2.
     Label: 1 = supernova present, 0 = no supernova.
     """
 
     def __init__(self, samples, augment=False):
         """
         Args:
-            samples: list of (hst_path, jwst_path, label) tuples
+            samples: list of (hst_path, jwst1_path, jwst2_path, label) tuples
             augment: apply random augmentation
         """
         self.samples = samples
@@ -141,53 +153,41 @@ class SupernovaDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        hst_path, jwst_path, label = self.samples[idx]
+        hst_path, jwst1_path, jwst2_path, label = self.samples[idx]
 
         hst_img = load_and_resize(hst_path)
-        jwst_img = load_and_resize(jwst_path)
+        jwst1_img = load_and_resize(jwst1_path)
+        jwst2_img = load_and_resize(jwst2_path)
 
-        if hst_img is None or jwst_img is None:
-            # Return zeros if loading fails
-            return torch.zeros(2, IMAGE_SIZE, IMAGE_SIZE), torch.tensor(0.0)
+        if hst_img is None or jwst1_img is None or jwst2_img is None:
+            return torch.zeros(NUM_CHANNELS, IMAGE_SIZE, IMAGE_SIZE), torch.tensor(0.0)
 
         if self.augment:
-            # Random flips
-            if random.random() > 0.5:
-                hst_img = np.fliplr(hst_img).copy()
-                jwst_img = np.fliplr(jwst_img).copy()
-            if random.random() > 0.5:
-                hst_img = np.flipud(hst_img).copy()
-                jwst_img = np.flipud(jwst_img).copy()
-            # Random rotation (0, 90, 180, 270)
-            k = random.randint(0, 3)
-            hst_img = np.rot90(hst_img, k).copy()
-            jwst_img = np.rot90(jwst_img, k).copy()
+            hst_img, jwst1_img, jwst2_img = augment_images([hst_img, jwst1_img, jwst2_img])
 
-        # Stack as 2-channel input
-        pair = np.stack([hst_img, jwst_img], axis=0)
-        return torch.tensor(pair, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
+        triplet = np.stack([hst_img, jwst1_img, jwst2_img], axis=0)
+        return torch.tensor(triplet, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
 
 
 class ArtificialSupernovaDataset(Dataset):
-    """Generate training data with artificial supernovae injected into either image.
+    """Generate training data with artificial supernovae injected.
 
-    A supernova can appear in either epoch:
-    - In the JWST image (SN happened between HST and JWST observations)
-    - In the HST image (SN happened before HST, faded by JWST epoch)
-    The CNN must learn to detect a bright transient in either channel.
+    Physical constraints:
+    - JWST supernova: SN appears in BOTH jwst1 and jwst2 (same position),
+      but NOT in HST (SN happened after HST observation).
+    - HST supernova: SN appears in HST only, NOT in jwst1 or jwst2
+      (SN was active during HST epoch, faded by JWST epoch).
     """
 
-    def __init__(self, hst_paths, jwst_paths, num_positive, num_negative, augment=True):
+    def __init__(self, object_files, num_positive, num_negative, augment=True):
         """
         Args:
-            hst_paths: list of HST image paths (non-SN objects)
-            jwst_paths: list of corresponding JWST image paths
+            object_files: list of {"hst": path, "jwst1": path, "jwst2": path} dicts
             num_positive: number of artificial SN samples to generate
             num_negative: number of negative (no SN) samples
             augment: apply random augmentation
         """
-        self.hst_paths = hst_paths
-        self.jwst_paths = jwst_paths
+        self.object_files = object_files
         self.num_positive = num_positive
         self.num_negative = num_negative
         self.total = num_positive + num_negative
@@ -199,52 +199,54 @@ class ArtificialSupernovaDataset(Dataset):
     def __getitem__(self, idx):
         is_positive = idx < self.num_positive
 
-        # Pick a random pair
-        i = random.randint(0, len(self.hst_paths) - 1)
-        hst_img = load_and_resize(self.hst_paths[i])
-        jwst_img = load_and_resize(self.jwst_paths[i])
+        # Pick a random object
+        files = random.choice(self.object_files)
+        hst_img = load_and_resize(files["hst"])
+        jwst1_img = load_and_resize(files["jwst1"])
+        jwst2_img = load_and_resize(files["jwst2"])
 
-        if hst_img is None or jwst_img is None:
-            return torch.zeros(2, IMAGE_SIZE, IMAGE_SIZE), torch.tensor(0.0)
+        if hst_img is None or jwst1_img is None or jwst2_img is None:
+            return torch.zeros(NUM_CHANNELS, IMAGE_SIZE, IMAGE_SIZE), torch.tensor(0.0)
 
         if is_positive:
-            # Randomly inject supernova into HST or JWST image
             if random.random() > 0.5:
-                jwst_img, _ = add_artificial_supernova(jwst_img)
+                # JWST supernova: inject into BOTH jwst1 and jwst2 at same position
+                h, w = jwst1_img.shape
+                x = random.randint(5, w - 6)
+                y = random.randint(5, h - 6)
+                peak = random.uniform(0.3, 0.9)
+                sigma = random.uniform(1.0, 3.0)
+                yy, xx = np.mgrid[0:h, 0:w]
+                gaussian = peak * np.exp(-((xx - x)**2 + (yy - y)**2) / (2 * sigma**2))
+                jwst1_img = np.clip(jwst1_img + gaussian, 0, 1).astype(np.float32)
+                jwst2_img = np.clip(jwst2_img + gaussian, 0, 1).astype(np.float32)
             else:
+                # HST supernova: inject into HST only
                 hst_img, _ = add_artificial_supernova(hst_img)
             label = 1.0
         else:
             label = 0.0
 
         if self.augment:
-            if random.random() > 0.5:
-                hst_img = np.fliplr(hst_img).copy()
-                jwst_img = np.fliplr(jwst_img).copy()
-            if random.random() > 0.5:
-                hst_img = np.flipud(hst_img).copy()
-                jwst_img = np.flipud(jwst_img).copy()
-            k = random.randint(0, 3)
-            hst_img = np.rot90(hst_img, k).copy()
-            jwst_img = np.rot90(jwst_img, k).copy()
+            hst_img, jwst1_img, jwst2_img = augment_images([hst_img, jwst1_img, jwst2_img])
 
-        pair = np.stack([hst_img, jwst_img], axis=0)
-        return torch.tensor(pair, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
+        triplet = np.stack([hst_img, jwst1_img, jwst2_img], axis=0)
+        return torch.tensor(triplet, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
 
 
 # --- CNN Model ---
 
 class SupernovaCNN(nn.Module):
-    """Simple CNN for binary classification of (HST, JWST) image pairs.
+    """CNN for binary classification of (HST, JWST1, JWST2) image triplets.
 
-    Input: 2-channel 64x64 image (HST + JWST).
+    Input: 3-channel 64x64 image (HST + JWST1 + JWST2).
     Output: single probability (supernova present or not).
     """
 
     def __init__(self):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),
+            nn.Conv2d(NUM_CHANNELS, 16, kernel_size=3, padding=1),
             nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.MaxPool2d(2),
@@ -325,16 +327,17 @@ def validate(model, loader, criterion, device):
 
 # --- Inference ---
 
-def predict_object(model, hst_path, jwst_path, device):
-    """Predict supernova probability for a single (HST, JWST) pair."""
+def predict_object(model, hst_path, jwst1_path, jwst2_path, device):
+    """Predict supernova probability for a single (HST, JWST1, JWST2) triplet."""
     hst_img = load_and_resize(hst_path)
-    jwst_img = load_and_resize(jwst_path)
+    jwst1_img = load_and_resize(jwst1_path)
+    jwst2_img = load_and_resize(jwst2_path)
 
-    if hst_img is None or jwst_img is None:
+    if hst_img is None or jwst1_img is None or jwst2_img is None:
         return 0.0
 
-    pair = np.stack([hst_img, jwst_img], axis=0)
-    tensor = torch.tensor(pair, dtype=torch.float32).unsqueeze(0).to(device)
+    triplet = np.stack([hst_img, jwst1_img, jwst2_img], axis=0)
+    tensor = torch.tensor(triplet, dtype=torch.float32).unsqueeze(0).to(device)
 
     model.eval()
     with torch.no_grad():
@@ -375,11 +378,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Build file map
+    # Build file map — require all 3 images (HST + JWST1 + JWST2)
     file_map = build_file_maps(args.hst_dir, args.jwst_dir)
     paired = {k: v for k, v in file_map.items()
-              if "hst" in v and ("jwst1" in v or "jwst2" in v)}
-    print(f"Matched {len(paired)} objects with both HST and JWST images")
+              if "hst" in v and "jwst1" in v and "jwst2" in v}
+    print(f"Matched {len(paired)} objects with HST + JWST1 + JWST2")
 
     # Separate known supernovae and non-supernovae
     known_sn_objects = {k: v for k, v in paired.items() if k in KNOWN_SUPERNOVAE_SET}
@@ -392,41 +395,41 @@ def main():
     if missing:
         print(f"  Missing IDs: {sorted(missing)}")
 
+    # Expected SN rate: ~1-2 per 1000 objects
+    expected_rate = len(KNOWN_SUPERNOVAE_SET) / len(paired) if len(paired) > 0 else 0.001
+    print(f"Expected SN rate: ~{expected_rate*1000:.1f} per 1000 objects")
+
     # --- Build training data ---
     print("\n--- Building training data ---")
 
-    # Positive samples: known supernovae (real)
+    # Positive samples: known supernovae (real) as (hst, jwst1, jwst2) triplets
     real_positive = []
     for obj_id, files in known_sn_objects.items():
-        hst_path = files["hst"]
-        for jwst_key in ["jwst1", "jwst2"]:
-            if jwst_key in files:
-                real_positive.append((hst_path, files[jwst_key], 1.0))
+        real_positive.append((files["hst"], files["jwst1"], files["jwst2"], 1.0))
     print(f"Real positive samples (known SN): {len(real_positive)}")
 
-    # Collect non-SN paths for artificial generation
-    non_sn_hst = []
-    non_sn_jwst = []
+    # Collect non-SN objects for artificial generation (need all 3 images)
     non_sn_keys = list(non_sn_objects.keys())
     random.shuffle(non_sn_keys)
-    for obj_id in non_sn_keys[:10000]:  # Use up to 10K non-SN objects for training pool
+    non_sn_file_list = []
+    for obj_id in non_sn_keys[:10000]:
         files = non_sn_objects[obj_id]
-        hst_path = files["hst"]
-        jwst_key = "jwst1" if "jwst1" in files else "jwst2"
-        non_sn_hst.append(hst_path)
-        non_sn_jwst.append(files[jwst_key])
+        non_sn_file_list.append(files)
 
-    # Create artificial SN dataset
-    print(f"Generating {args.num_artificial} artificial SN + {args.num_artificial} negative samples")
+    # Use highly imbalanced training: many more negatives than positives
+    # to match the real ~1/1000 SN rate and reduce false positives
+    num_neg = args.num_artificial * 10  # 10:1 negative to positive ratio
+    print(f"Generating {args.num_artificial} artificial SN + {num_neg} negative samples")
     art_dataset = ArtificialSupernovaDataset(
-        non_sn_hst, non_sn_jwst,
+        non_sn_file_list,
         num_positive=args.num_artificial,
-        num_negative=args.num_artificial,
+        num_negative=num_neg,
         augment=True,
     )
 
-    # Also add real known SN as positive samples
-    real_sn_dataset = SupernovaDataset(real_positive, augment=True)
+    # Also add real known SN as positive samples (oversampled)
+    real_sn_samples = real_positive * 20  # Oversample real SN to boost signal
+    real_sn_dataset = SupernovaDataset(real_sn_samples, augment=True)
 
     # Combine datasets
     train_dataset = torch.utils.data.ConcatDataset([art_dataset, real_sn_dataset])
@@ -445,7 +448,9 @@ def main():
     # --- Train ---
     print(f"\n--- Training CNN for {args.epochs} epochs ---")
     model = SupernovaCNN().to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    # Use pos_weight to account for class imbalance
+    pos_weight = torch.tensor([num_neg / args.num_artificial]).to(device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
@@ -475,19 +480,14 @@ def main():
     missed = []
 
     for obj_id, files in known_sn_objects.items():
-        hst_path = files["hst"]
-        max_prob = 0.0
-        for jwst_key in ["jwst1", "jwst2"]:
-            if jwst_key in files:
-                prob = predict_object(model, hst_path, files[jwst_key], device)
-                max_prob = max(max_prob, prob)
+        prob = predict_object(model, files["hst"], files["jwst1"], files["jwst2"], device)
 
-        if max_prob >= args.threshold:
-            recovered.append((obj_id, max_prob))
-            print(f"  RECOVERED: {obj_id} (prob={max_prob:.3f})")
+        if prob >= args.threshold:
+            recovered.append((obj_id, prob))
+            print(f"  RECOVERED: {obj_id} (prob={prob:.3f})")
         else:
-            missed.append((obj_id, max_prob))
-            print(f"  MISSED:    {obj_id} (prob={max_prob:.3f})")
+            missed.append((obj_id, prob))
+            print(f"  MISSED:    {obj_id} (prob={prob:.3f})")
 
     print(f"\nRecovery: {len(recovered)}/{len(known_sn_objects)} "
           f"({len(recovered)/max(len(known_sn_objects),1)*100:.1f}%)")
@@ -501,16 +501,11 @@ def main():
 
     for obj_id in sorted(paired.keys()):
         files = paired[obj_id]
-        hst_path = files["hst"]
+        prob = predict_object(model, files["hst"], files["jwst1"], files["jwst2"], device)
 
-        for jwst_key in ["jwst1", "jwst2"]:
-            if jwst_key not in files:
-                continue
-            prob = predict_object(model, hst_path, files[jwst_key], device)
-            if prob >= args.threshold:
-                jwst_fname = os.path.basename(files[jwst_key])
-                is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
-                all_candidates.append([obj_id, jwst_fname, f"{prob:.4f}", is_known])
+        if prob >= args.threshold:
+            is_known = "YES" if obj_id in KNOWN_SUPERNOVAE_SET else "NO"
+            all_candidates.append([obj_id, f"{prob:.4f}", is_known])
 
         completed += 1
         if completed % 5000 == 0 or completed == total:
@@ -526,19 +521,20 @@ def main():
 
     # Save results
     if all_candidates:
-        all_candidates.sort(key=lambda r: float(r[2]), reverse=True)
+        all_candidates.sort(key=lambda r: float(r[1]), reverse=True)
 
         with open(args.output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["object_id", "jwst_file", "probability", "known_sn"])
+            writer.writerow(["object_id", "probability", "known_sn"])
             writer.writerows(all_candidates)
         print(f"Candidates saved to {args.output_csv}")
 
-        known_found = sum(1 for r in all_candidates if r[3] == "YES")
-        new_found = sum(1 for r in all_candidates if r[3] == "NO")
+        known_found = sum(1 for r in all_candidates if r[2] == "YES")
+        new_found = sum(1 for r in all_candidates if r[2] == "NO")
         print(f"Total candidates: {len(all_candidates)}")
         print(f"  Known supernovae recovered: {known_found}")
         print(f"  New supernova candidates: {new_found}")
+        print(f"  Detection rate: {len(all_candidates)/total*1000:.1f} per 1000 objects")
     else:
         print("\nNo supernova candidates found.")
 

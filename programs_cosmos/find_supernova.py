@@ -152,35 +152,119 @@ def process_pair(hst_path, jwst_path, match_radius, min_brightness, output_dir):
         return np.empty((0, 3))
 
 
+def find_common_sources(sources1, sources2, match_radius=10.0):
+    """Find sources that appear in both sets within match_radius pixels.
+
+    Returns the matched sources from sources1 with their positions.
+    """
+    if len(sources1) == 0 or len(sources2) == 0:
+        return np.empty((0, 3))
+
+    tree2 = cKDTree(sources2[:, :2])
+    distances, _ = tree2.query(sources1[:, :2])
+
+    matched = distances <= match_radius
+    return sources1[matched]
+
+
 def process_object(args):
-    """Worker function for multiprocessing. Processes one object (HST vs JWST1/JWST2).
+    """Worker function for multiprocessing. Processes one object.
+
+    Supernova detection logic:
+    - JWST supernova: a new source must appear in BOTH jwst1 and jwst2
+      (same SN visible in both filters) but NOT in HST.
+    - HST supernova: a source in HST that is NOT in jwst1 and NOT in jwst2
+      (SN was active during HST epoch, faded by JWST epoch).
 
     Args:
         tuple: (obj_key, files_dict, match_radius, min_brightness, output_dir)
 
     Returns:
-        list of [obj_key, jwst_filename, x, y, brightness] rows
+        list of [obj_key, hst_field, jwst_field, detection_type, x, y, brightness] rows
     """
     obj_key, files, match_radius, min_brightness, output_dir = args
     results = []
 
-    hst_path = files["hst"]
+    hst_path = files.get("hst")
+    jwst1_path = files.get("jwst1")
+    jwst2_path = files.get("jwst2")
 
-    for jwst_key in ["jwst1", "jwst2"]:
-        if jwst_key not in files:
-            continue
-        jwst_path = files[jwst_key]
+    try:
+        # Load and detect sources in all available images
+        hst_sources = np.empty((0, 3))
+        jwst1_sources = np.empty((0, 3))
+        jwst2_sources = np.empty((0, 3))
 
-        candidates = process_pair(
-            hst_path, jwst_path,
-            match_radius, min_brightness, output_dir
-        )
-        if len(candidates) > 0:
-            jwst_fname = os.path.basename(jwst_path)
+        if hst_path:
+            hst_data = load_image(hst_path)
+            hst_sources = detect_sources(hst_data)
+        if jwst1_path:
+            jwst1_data = load_image(jwst1_path)
+            jwst1_sources = detect_sources(jwst1_data)
+        if jwst2_path:
+            jwst2_data = load_image(jwst2_path)
+            jwst2_sources = detect_sources(jwst2_data)
+
+        hst_field = files.get("hst_field", "")
+        jwst_field = files.get("jwst_field", "")
+
+        # --- JWST supernova: source in BOTH jwst1 and jwst2, but NOT in HST ---
+        if len(jwst1_sources) > 0 and len(jwst2_sources) > 0:
+            # Find sources in jwst1 that also appear in jwst2
+            jwst_common = find_common_sources(jwst1_sources, jwst2_sources, match_radius)
+
+            # Of those, find ones NOT in HST
+            if len(jwst_common) > 0 and len(hst_sources) > 0:
+                candidates = find_new_sources(jwst_common, hst_sources, match_radius)
+            elif len(jwst_common) > 0:
+                candidates = jwst_common
+            else:
+                candidates = np.empty((0, 3))
+
+            if len(candidates) > 0 and min_brightness > 0:
+                candidates = candidates[candidates[:, 2] >= min_brightness]
+            if len(candidates) > 0:
+                candidates = candidates[candidates[:, 2].argsort()[::-1]]
+
             for x, y, bright in candidates:
-                hst_field = files.get("hst_field", "")
-                jwst_field = files.get("jwst_field", "")
-                results.append([obj_key, hst_field, jwst_field, jwst_fname, x, y, bright])
+                results.append([obj_key, hst_field, jwst_field, "JWST_SN",
+                                x, y, bright])
+
+            if len(candidates) > 0 and output_dir and jwst1_path:
+                basename = os.path.splitext(os.path.basename(jwst1_path))[0]
+                out_path = os.path.join(output_dir, f"{basename}_jwst_sn.png")
+                save_candidates_image(jwst1_data, candidates, out_path)
+
+        # --- HST supernova: source in HST, but NOT in jwst1 AND NOT in jwst2 ---
+        if len(hst_sources) > 0:
+            # Find HST sources not in jwst1
+            if len(jwst1_sources) > 0:
+                hst_not_jwst1 = find_new_sources(hst_sources, jwst1_sources, match_radius)
+            else:
+                hst_not_jwst1 = hst_sources
+
+            # Of those, also not in jwst2
+            if len(hst_not_jwst1) > 0 and len(jwst2_sources) > 0:
+                hst_candidates = find_new_sources(hst_not_jwst1, jwst2_sources, match_radius)
+            else:
+                hst_candidates = hst_not_jwst1
+
+            if len(hst_candidates) > 0 and min_brightness > 0:
+                hst_candidates = hst_candidates[hst_candidates[:, 2] >= min_brightness]
+            if len(hst_candidates) > 0:
+                hst_candidates = hst_candidates[hst_candidates[:, 2].argsort()[::-1]]
+
+            for x, y, bright in hst_candidates:
+                results.append([obj_key, hst_field, jwst_field, "HST_SN",
+                                x, y, bright])
+
+            if len(hst_candidates) > 0 and output_dir and hst_path:
+                basename = os.path.splitext(os.path.basename(hst_path))[0]
+                out_path = os.path.join(output_dir, f"{basename}_hst_sn.png")
+                save_candidates_image(hst_data, hst_candidates, out_path)
+
+    except Exception as e:
+        print(f"  Error processing {obj_key}: {e}")
 
     return results
 
@@ -342,7 +426,7 @@ def main():
 
         with open(args.output_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["object_id", "hst_field", "jwst_field", "jwst_file",
+            writer.writerow(["object_id", "hst_field", "jwst_field", "detection_type",
                              "x", "y", "brightness"])
             writer.writerows(all_candidates)
         print(f"All candidates saved to {args.output_csv}")
