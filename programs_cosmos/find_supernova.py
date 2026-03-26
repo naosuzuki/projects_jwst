@@ -208,6 +208,18 @@ def process_object(args):
         hst_field = files.get("hst_field", "")
         jwst_field = files.get("jwst_field", "")
 
+        # Galaxy is at center of each PNG cutout.
+        # Real SN only occurs near the host galaxy, so filter candidates
+        # to within 30% of image center.
+        def filter_near_center(sources, image_shape, max_frac=0.3):
+            if len(sources) == 0:
+                return sources
+            h, w = image_shape
+            cx, cy = w / 2.0, h / 2.0
+            max_dist = max_frac * min(h, w)
+            dist = np.sqrt((sources[:, 0] - cx)**2 + (sources[:, 1] - cy)**2)
+            return sources[dist <= max_dist]
+
         # --- JWST supernova: source in BOTH jwst1 and jwst2, but NOT in HST ---
         if len(jwst1_sources) > 0 and len(jwst2_sources) > 0:
             # Find sources in jwst1 that also appear in jwst2
@@ -221,6 +233,9 @@ def process_object(args):
             else:
                 candidates = np.empty((0, 3))
 
+            # SN must be near host galaxy (image center)
+            if len(candidates) > 0:
+                candidates = filter_near_center(candidates, jwst1_data.shape)
             if len(candidates) > 0 and min_brightness > 0:
                 candidates = candidates[candidates[:, 2] >= min_brightness]
             if len(candidates) > 0:
@@ -249,6 +264,9 @@ def process_object(args):
             else:
                 hst_candidates = hst_not_jwst1
 
+            # SN must be near host galaxy (image center)
+            if len(hst_candidates) > 0:
+                hst_candidates = filter_near_center(hst_candidates, hst_data.shape)
             if len(hst_candidates) > 0 and min_brightness > 0:
                 hst_candidates = hst_candidates[hst_candidates[:, 2] >= min_brightness]
             if len(hst_candidates) > 0:

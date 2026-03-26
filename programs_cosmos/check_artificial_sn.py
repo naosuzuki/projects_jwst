@@ -124,9 +124,13 @@ def main():
 
         h, w = hst_img.shape
 
-        # --- JWST supernova example ---
-        x = random.randint(20, w - 21)
-        y = random.randint(20, h - 21)
+        # --- JWST supernova example (near center where host galaxy is) ---
+        cx, cy = w // 2, h // 2
+        max_offset = int(w * 0.3)
+        x = cx + random.randint(-max_offset, max_offset)
+        y = cy + random.randint(-max_offset, max_offset)
+        x = max(3, min(w - 4, x))
+        y = max(3, min(h - 4, y))
         peak = random.uniform(0.3, 0.9)
         sigma = random.uniform(2.0, 5.0)
 
@@ -165,9 +169,11 @@ def main():
         cv2.imwrite(out_path, jwst_panel)
         print(f"  JWST SN: {out_path} (pos={x},{y} peak={peak:.2f} sigma={sigma:.1f})")
 
-        # --- HST supernova example ---
-        x2 = random.randint(20, w - 21)
-        y2 = random.randint(20, h - 21)
+        # --- HST supernova example (near center where host galaxy is) ---
+        x2 = cx + random.randint(-max_offset, max_offset)
+        y2 = cy + random.randint(-max_offset, max_offset)
+        x2 = max(3, min(w - 4, x2))
+        y2 = max(3, min(h - 4, y2))
         peak_h = random.uniform(0.3, 0.9)
         sigma_h = random.uniform(2.0, 5.0)
 

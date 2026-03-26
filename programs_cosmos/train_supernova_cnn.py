@@ -113,11 +113,34 @@ def inject_supernova_at(image, x, y, peak, sigma):
     return np.clip(img + gaussian, 0, 1).astype(np.float32)
 
 
+def random_position_near_center(h, w, max_offset_frac=0.3):
+    """Generate a random position near the image center.
+
+    The galaxy is always at the center of the PNG cutout.
+    A real supernova occurs near its host galaxy, so we place
+    artificial SN within max_offset_frac of the center.
+
+    Args:
+        h, w: image height and width
+        max_offset_frac: maximum offset from center as fraction of image size
+
+    Returns:
+        (x, y) position near center
+    """
+    cx, cy = w // 2, h // 2
+    max_dx = int(w * max_offset_frac)
+    max_dy = int(h * max_offset_frac)
+    x = cx + random.randint(-max_dx, max_dx)
+    y = cy + random.randint(-max_dy, max_dy)
+    x = max(3, min(w - 4, x))
+    y = max(3, min(h - 4, y))
+    return x, y
+
+
 def add_artificial_supernova(image):
-    """Inject one artificial supernova at a random position."""
+    """Inject one artificial supernova near the host galaxy (image center)."""
     h, w = image.shape
-    x = random.randint(5, w - 6)
-    y = random.randint(5, h - 6)
+    x, y = random_position_near_center(h, w)
     peak = random.uniform(0.3, 0.9)
     sigma = random.uniform(1.0, 3.0)
     return inject_supernova_at(image, x, y, peak, sigma), (x, y, peak, sigma)
@@ -200,9 +223,9 @@ class ArtificialSupernovaDataset(Dataset):
         if is_positive:
             if random.random() > 0.5:
                 # JWST SN: same source in both JWST filters, not in HST
+                # Place near center (where the host galaxy is)
                 h, w = jwst1_img.shape
-                x = random.randint(5, w - 6)
-                y = random.randint(5, h - 6)
+                x, y = random_position_near_center(h, w)
                 peak = random.uniform(0.3, 0.9)
                 sigma = random.uniform(1.0, 3.0)
                 jwst1_img = inject_supernova_at(jwst1_img, x, y, peak, sigma)
@@ -210,7 +233,7 @@ class ArtificialSupernovaDataset(Dataset):
                 peak2 = peak * random.uniform(0.7, 1.3)
                 jwst2_img = inject_supernova_at(jwst2_img, x, y, peak2, sigma)
             else:
-                # HST SN: only in HST, not in either JWST
+                # HST SN: only in HST, near center (host galaxy)
                 hst_img, _ = add_artificial_supernova(hst_img)
             label = 1.0
         else:
