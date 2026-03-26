@@ -247,6 +247,7 @@ class ArtificialSupernovaDataset(Dataset):
         is_positive = idx < self.num_positive
 
         files = random.choice(self.object_files)
+        # Load full-size images first (SN is injected before cropping)
         hst_img = load_and_resize(files["hst"])
         jwst1_img = load_and_resize(files["jwst1"])
         jwst2_img = load_and_resize(files["jwst2"])
@@ -272,6 +273,11 @@ class ArtificialSupernovaDataset(Dataset):
             label = 1.0
         else:
             label = 0.0
+
+        # Crop center AFTER injection — focus on galaxy + SN region
+        hst_img = crop_center(hst_img)
+        jwst1_img = crop_center(jwst1_img)
+        jwst2_img = crop_center(jwst2_img)
 
         if self.augment:
             hst_img, jwst1_img, jwst2_img = augment_images(
@@ -354,9 +360,9 @@ def train_epoch(model, loader, criterion, optimizer, device):
 
 def predict_object(model, hst_path, jwst1_path, jwst2_path, device):
     """Predict supernova probability for one (HST, JWST1, JWST2) triplet."""
-    hst_img = load_and_resize(hst_path)
-    jwst1_img = load_and_resize(jwst1_path)
-    jwst2_img = load_and_resize(jwst2_path)
+    hst_img = load_and_crop_center(hst_path)
+    jwst1_img = load_and_crop_center(jwst1_path)
+    jwst2_img = load_and_crop_center(jwst2_path)
 
     if hst_img is None or jwst1_img is None or jwst2_img is None:
         return 0.0
