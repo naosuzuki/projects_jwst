@@ -51,12 +51,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
-# 23 confirmed supernovae identified by visual inspection
+# 19 confirmed supernovae identified by visual inspection
 KNOWN_SUPERNOVAE = [
-    "471959", "53669", "296673", "296868", "318858", "320233",
-    "9748", "52864", "407613", "239246", "239875",
-    "245766", "468896", "469221", "120035", "63919", "78323",
-    "25141", "25283", "27350", "435613", "435768",
+    "9748", "19931", "25141", "27350", "39020", "52864", "53669",
+    "63919", "63924", "64479", "78323", "239301", "245766",
+    "246188", "296673", "296868", "318858", "349174", "435613",
 ]
 KNOWN_SUPERNOVAE_SET = set(KNOWN_SUPERNOVAE)
 
