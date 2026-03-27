@@ -482,28 +482,62 @@ def main():
     print("STEP 2: Training CNN on difference images")
     print("="*60)
 
-    # Real positives (oversampled)
-    real_positive = []
+    # --- Verified ground truth ---
+    # IDs 1 through 53131 have been visually inspected:
+    #   Only 7 are real SN: 9748, 19931, 25141, 27350, 39020, 52864, 53669
+    #   ALL others in this range are confirmed negatives (not SN)
+    VERIFIED_MAX_ID = 53131
+    VERIFIED_SN = {"9748", "19931", "25141", "27350", "39020", "52864", "53669"}
+
+    # Build verified negative set: objects in ID range 1-53131 that are NOT SN
+    verified_negatives = []
+    verified_positives = []
+    for obj_id, files in paired.items():
+        try:
+            numeric_id = int(obj_id)
+        except ValueError:
+            continue
+        if numeric_id <= VERIFIED_MAX_ID:
+            if obj_id in VERIFIED_SN:
+                verified_positives.append((files["hst"], files["jwst1"], files["jwst2"], 1.0))
+            else:
+                verified_negatives.append((files["hst"], files["jwst1"], files["jwst2"], 0.0))
+
+    print(f"Verified ID range 1-{VERIFIED_MAX_ID}:")
+    print(f"  Verified positives (real SN): {len(verified_positives)}")
+    print(f"  Verified negatives (confirmed not SN): {len(verified_negatives)}")
+
+    # Also include all 23 known SN (some are outside the verified range)
+    all_known_positive = []
     for obj_id, files in known_sn_objects.items():
-        real_positive.append((files["hst"], files["jwst1"], files["jwst2"], 1.0))
-    real_sn_oversampled = real_positive * 50
-    print(f"Real positives: {len(real_positive)} x 50 = {len(real_sn_oversampled)}")
+        all_known_positive.append((files["hst"], files["jwst1"], files["jwst2"], 1.0))
+    print(f"All known SN (full dataset): {len(all_known_positive)}")
 
-    # Non-SN objects for artificial generation
-    non_sn_keys = list(non_sn_objects.keys())
-    random.shuffle(non_sn_keys)
-    non_sn_file_list = [non_sn_objects[k] for k in non_sn_keys[:10000]]
+    # Oversample positives to balance against verified negatives
+    # Use ~1:100 ratio (still heavily negative, but enough positives to learn)
+    num_neg = min(len(verified_negatives), 50000)  # Cap at 50K negatives
+    num_pos_repeats = max(1, num_neg // (len(all_known_positive) * 10))
+    real_sn_oversampled = all_known_positive * num_pos_repeats
+    print(f"Real positives oversampled: {len(all_known_positive)} x {num_pos_repeats} "
+          f"= {len(real_sn_oversampled)}")
 
-    # Artificial data: heavy negative ratio
+    # Sample verified negatives
+    random.shuffle(verified_negatives)
+    verified_neg_sample = verified_negatives[:num_neg]
+    print(f"Verified negatives used: {len(verified_neg_sample)}")
+
+    # Also add artificial SN for variety
+    non_sn_file_list = [non_sn_objects[k] for k in list(non_sn_objects.keys())[:10000]]
     num_art_pos = args.num_artificial
-    num_art_neg = num_art_pos * 20
-    print(f"Artificial: {num_art_pos} positive + {num_art_neg} negative")
+    print(f"Artificial positives: {num_art_pos}")
 
     art_dataset = ArtificialSNDataset(
-        non_sn_file_list, num_art_pos, num_art_neg, augment=True)
+        non_sn_file_list, num_positive=num_art_pos, num_negative=0, augment=True)
     real_sn_dataset = RealSupernovaDataset(real_sn_oversampled, augment=True)
+    real_neg_dataset = RealSupernovaDataset(verified_neg_sample, augment=True)
 
-    train_dataset = torch.utils.data.ConcatDataset([art_dataset, real_sn_dataset])
+    train_dataset = torch.utils.data.ConcatDataset(
+        [real_sn_dataset, real_neg_dataset, art_dataset])
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=True)
