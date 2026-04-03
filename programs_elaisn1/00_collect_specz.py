@@ -81,7 +81,7 @@ def _save_table(table, name):
 def query_sdss():
     from astroquery.sdss import SDSS
 
-    print("\n[1/8] SDSS/BOSS DR18 spectroscopy")
+    print("\n[1/11] SDSS/BOSS DR18 spectroscopy")
     print("-" * 50)
 
     query = f"""
@@ -113,7 +113,7 @@ def query_sdss():
 def download_hetdex_lofar():
     import requests
 
-    print("\n[2/8] HETDEX-LOFAR catalog (Debski et al. 2024)")
+    print("\n[2/11] HETDEX-LOFAR catalog (Debski et al. 2024)")
     print("-" * 50)
 
     zenodo_api = "https://zenodo.org/api/records/14194635"
@@ -152,7 +152,7 @@ def download_hetdex_lofar():
 # 3. DESI EDR / DR1 via NOIRLab DataLab TAP
 # ══════════════════════════════════════════════════════════════════════════════
 def query_desi():
-    print("\n[3/8] DESI EDR + DR1 via NOIRLab DataLab")
+    print("\n[3/11] DESI EDR + DR1 via NOIRLab DataLab")
     print("-" * 50)
 
     try:
@@ -192,7 +192,7 @@ def query_desi():
 def query_vizier():
     from astroquery.vizier import Vizier
 
-    print("\n[4/8] VizieR catalogs")
+    print("\n[4/11] VizieR catalogs")
     print("-" * 50)
 
     coord = SkyCoord(ra=RA_CENTER, dec=DEC_CENTER, unit='deg', frame='icrs')
@@ -241,7 +241,7 @@ def query_vizier():
 def query_ned():
     from astroquery.ipac.ned import Ned
 
-    print("\n[5/8] NED (NASA/IPAC Extragalactic Database)")
+    print("\n[5/11] NED (NASA/IPAC Extragalactic Database)")
     print("-" * 50)
 
     coord = SkyCoord(ra=RA_CENTER, dec=DEC_CENTER, unit='deg', frame='icrs')
@@ -268,7 +268,7 @@ def query_ned():
 def download_lofar_deepfields():
     import requests
 
-    print("\n[6/8] LoTSS Deep Fields ELAIS-N1 catalogs")
+    print("\n[6/11] LoTSS Deep Fields ELAIS-N1 catalogs")
     print("-" * 50)
     print("  Source: https://lofar-surveys.org/deepfields_public_en1.html")
 
@@ -310,12 +310,42 @@ def download_lofar_deepfields():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. HELP spectroscopic redshift catalog from HeDaM
+# 7. MMT/Hectospec low-z galaxies (Cheng et al. 2021)
+# ══════════════════════════════════════════════════════════════════════════════
+def download_mmt_hectospec():
+    import urllib.request
+
+    print("\n[7/11] MMT/Hectospec (Cheng et al. 2021, ApJS 256, 4)")
+    print("-" * 50)
+    print("  2,753 redshifts total (DEEP2-3 + ELAIS-N1 + XMM-LSS)")
+    print("  ~1,082 in ELAIS-N1 (0.03 < z < 1.4, r < 22)")
+
+    url = ("https://raw.githubusercontent.com/chengchengcode/"
+           "low-redshift-galaxies/main/MMT.Hectospec.specz.v2.txt")
+    fpath = os.path.join(OUTDIR, "MMT_Hectospec_specz_v2.txt")
+
+    if os.path.exists(fpath):
+        print(f"  Already downloaded: {fpath}")
+        return fpath
+
+    try:
+        print("  Downloading from GitHub...")
+        urllib.request.urlretrieve(url, fpath)
+        print(f"  -> Saved {fpath} ({os.path.getsize(fpath)/1024:.0f} KB)")
+        return fpath
+    except Exception as e:
+        print(f"  Download error: {e}")
+        print("  Manual: https://github.com/chengchengcode/low-redshift-galaxies")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. HELP spectroscopic redshift catalog from HeDaM
 # ══════════════════════════════════════════════════════════════════════════════
 def download_help_specz():
     import requests
 
-    print("\n[7/10] HELP spectroscopic redshift catalog (HeDaM)")
+    print("\n[8/11] HELP spectroscopic redshift catalog (HeDaM)")
     print("-" * 50)
     print("  Source: hedam.lam.fr/HELP/dataproducts/dmu23/dmu23_ELAIS-N1/")
     print("  Surveys: Berta+2007, SDSS, Trichas+2010, Swinbank+2007,")
@@ -353,7 +383,7 @@ def download_help_specz():
 # 8. VizieR TAP (alternative to standard VizieR if blocked)
 # ══════════════════════════════════════════════════════════════════════════════
 def query_vizier_tap():
-    print("\n[8/10] VizieR TAP (alternative access)")
+    print("\n[9/11] VizieR TAP (alternative access)")
     print("-" * 50)
 
     try:
@@ -389,7 +419,7 @@ def query_vizier_tap():
 def download_hetdex_public():
     import requests
 
-    print("\n[9/10] HETDEX Public Source Catalog")
+    print("\n[10/11] HETDEX Public Source Catalog")
     print("-" * 50)
     print("  https://hetdex.org/data-results/")
     print("  Zenodo: https://zenodo.org/records/7448504")
@@ -463,7 +493,12 @@ if __name__ == '__main__':
     for f in lofar_files:
         summary.append(("LoTSS Deep Fields", "FITS", f))
 
-    # 7. HELP spec-z from HeDaM
+    # 7. MMT/Hectospec (Cheng+2021)
+    mmt_path = download_mmt_hectospec()
+    if mmt_path:
+        summary.append(("MMT/Hectospec Cheng+2021", "TXT", mmt_path))
+
+    # 8. HELP spec-z from HeDaM
     help_path = download_help_specz()
     if help_path:
         summary.append(("HELP dmu23", "CSV", help_path))

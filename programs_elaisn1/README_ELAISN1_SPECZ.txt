@@ -53,7 +53,13 @@ CATALOG INVENTORY
    - VizieR: J/MNRAS/428/1958
    - Reference: Rowan-Robinson et al. 2013, MNRAS 428, 1958
 
-7. HELP Project (dmu23 ELAIS-N1)
+7. Cheng et al. 2021 (1,082 spec-z in ELAIS-N1)  ** DOWNLOADED **
+   - MMT/Hectospec multi-fiber spectroscopy of faint galaxies (18 < r < 22)
+   - 2,753 total across 3 fields, 1,082 in ELAIS-N1 (0.03 < z < 1.4)
+   - GitHub: https://github.com/chengchengcode/low-redshift-galaxies
+   - Reference: Cheng et al. 2021, ApJS 256, 4
+
+8. HELP Project (dmu23 ELAIS-N1)
    - Merged spectroscopic catalog from 8 surveys:
      Berta+2007, SDSS DR13, Trichas+2010, Swinbank+2007,
      Rowan-Robinson+2013 (WIYN/Keck/Gemini), NED, UZC, Lacy+2013

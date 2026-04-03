@@ -157,6 +157,31 @@ def read_vizier_generic(filepath, survey_name, reference):
     return out.dropna(subset=['ra', 'dec', 'z_spec']).query('z_spec > 0')
 
 
+def read_mmt_hectospec(filepath):
+    """Read MMT/Hectospec catalog (Cheng et al. 2021, ApJS 256, 4).
+
+    Columns: ID, RA(J2000), Dec(J2000), r_aper(1"), z_spec, z_err, zq
+    Contains 2,753 redshifts across DEEP2-3, ELAIS-N1, and XMM-LSS.
+    """
+    df = pd.read_csv(filepath, sep=r'\s+')
+    print(f"  MMT/Hectospec columns: {list(df.columns)}")
+    print(f"  Total rows: {len(df)}")
+
+    out = pd.DataFrame({
+        'ra': pd.to_numeric(df['RA(J2000)'], errors='coerce'),
+        'dec': pd.to_numeric(df['Dec(J2000)'], errors='coerce'),
+        'z_spec': pd.to_numeric(df['z_spec'], errors='coerce'),
+        'z_err': pd.to_numeric(df['z_err'], errors='coerce'),
+        'obj_class': '',
+        'survey': 'MMT/Hectospec',
+        'reference': 'Cheng+2021',
+    })
+    # Keep only quality >= 3 (probable or reliable)
+    zq = pd.to_numeric(df['zq'], errors='coerce')
+    out = out[zq >= 3]
+    return out.dropna(subset=['ra', 'dec', 'z_spec']).query('z_spec > 0')
+
+
 def read_help_specz(filepath):
     """Read HELP dmu23 ELAIS-N1 spec-z CSV.
 
@@ -285,8 +310,8 @@ def deduplicate(df, radius_arcsec=MATCH_RADIUS_ARCSEC):
 
     # Sort by z_err (NaN last) so we keep best measurements
     survey_priority = {
-        'DESI': 0, 'SDSS': 1, 'HETDEX': 2,
-        'SWIRE': 3, 'HELP': 4, 'LoTSS-Deep': 5, 'NED': 6
+        'DESI': 0, 'SDSS': 1, 'MMT/Hectospec': 2, 'HETDEX': 3,
+        'SWIRE': 4, 'HELP': 5, 'LoTSS-Deep': 6, 'NED': 7
     }
     df = df.copy()
     df['_priority'] = df['survey'].map(survey_priority).fillna(6)
@@ -337,7 +362,8 @@ def main():
     all_dfs = []
 
     # ── CSV files from 00_collect_specz.py ────────────────────────────────
-    csv_files = sorted(glob.glob(os.path.join(DATADIR, '*.csv')))
+    csv_files = sorted(glob.glob(os.path.join(DATADIR, '*.csv')) +
+                       glob.glob(os.path.join(DATADIR, '*.txt')))
     for f in csv_files:
         basename = os.path.basename(f)
         if basename == 'collection_summary.csv' or basename.startswith('elaisn1_specz'):
@@ -351,6 +377,8 @@ def main():
                 df = read_ned(f)
             elif 'desi_specz' in basename:
                 df = read_desi(f)
+            elif 'MMT_Hectospec' in basename or 'Hectospec' in basename:
+                df = read_mmt_hectospec(f)
             elif 'ELAIS-N1-specz' in basename or 'hedam' in basename:
                 df = read_help_specz(f)
             elif 'vizier_J_MNRAS_405_2243' in basename:
