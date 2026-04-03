@@ -201,12 +201,15 @@ def query_vizier():
     catalogs = {
         "J/MNRAS/405/2243":  "Gonzalez-Solares+2011 SWIRE ELAIS-N1 spec-z",
         "J/MNRAS/428/1958":  "Rowan-Robinson+2013 SWIRE photo-z (has spec-z col)",
+        "J/MNRAS/351/1290":  "Rowan-Robinson+2004 ELAIS band-merged (has spec-z)",
+        "II/290":            "SWIRE photometric redshift catalogue (has spec-z col)",
         "J/A+A/648/A4":      "Duncan+2021 LoTSS Deep photo-z (has z_spec col)",
         "J/A+A/648/A3":      "Kondapally+2021 LoTSS Deep host-galaxy IDs",
         "J/MNRAS/523/1729":  "Kondapally+2023 LoTSS Deep classifications",
         "J/MNRAS/507/129":   "Shirley+2021 HELP",
         "J/A+A/620/A50":     "Malek+2018 HELP ELAIS-N1",
         "V/154":             "SDSS DR16 spectroscopic (VizieR mirror)",
+        "V/161":             "DESI DR1 spectroscopic (VizieR mirror)",
         "VII/298":           "SDSS quasar catalog DR16Q",
         "J/MNRAS/542/2245":  "Arnaudova+2025 LOFAR spec classifications",
     }
