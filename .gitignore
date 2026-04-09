@@ -1,0 +1,3 @@
+# Large TESS data files (downloaded at runtime)
+sector7_targets.xml
+tess_s7_cutout.npy
