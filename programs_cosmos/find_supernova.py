@@ -28,14 +28,30 @@ import re
 import time
 from multiprocessing import Pool, cpu_count
 
-# 23 confirmed supernovae identified by visual inspection
-KNOWN_SUPERNOVAE = [
-    "9748", "19931", "25141", "27350", "39020", "52864", "53669",
-    "63919", "63924", "64479", "78323", "239301", "245766",
-    "246188", "296673", "296868", "318858", "349174", "435613",
-    "435768", "468896", "469221", "471959",
-]
-KNOWN_SUPERNOVAE_SET = set(KNOWN_SUPERNOVAE)
+# Default path to the ground-truth supernova catalog (relative to this script).
+# CSV columns: ID, TELESCOPE  (TELESCOPE is "JWST" or "HST")
+#   "JWST" -> SN appears in JWST but not HST (exploded between HST and JWST epochs)
+#   "HST"  -> SN appears in HST but not JWST (faded by JWST epoch)
+DEFAULT_KNOWN_SN_CSV = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "sn_v03.csv"
+)
+
+
+def load_known_supernovae(csv_path):
+    """Load confirmed supernovae from CSV.
+
+    Returns:
+        dict {object_id (str): telescope (str, "JWST" or "HST")}
+    """
+    known = {}
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            obj_id = (row.get("ID") or "").strip()
+            telescope = (row.get("TELESCOPE") or "").strip().upper()
+            if obj_id and telescope in ("JWST", "HST"):
+                known[obj_id] = telescope
+    return known
 
 import cv2
 import numpy as np
@@ -381,7 +397,14 @@ def main():
         "--num-workers", type=int, default=None,
         help="Number of parallel workers (default: CPU count)"
     )
+    parser.add_argument(
+        "--known-sn-csv", default=DEFAULT_KNOWN_SN_CSV,
+        help=f"CSV of confirmed supernovae (default: {DEFAULT_KNOWN_SN_CSV})"
+    )
     args = parser.parse_args()
+
+    known_sn = load_known_supernovae(args.known_sn_csv)
+    print(f"Loaded {len(known_sn)} confirmed supernovae from {args.known_sn_csv}")
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -453,21 +476,54 @@ def main():
     else:
         print("\nNo supernova candidates found.")
 
-    # Validation against known supernovae
-    detected_ids = set(r[0] for r in all_candidates)
-    recovered = KNOWN_SUPERNOVAE_SET & detected_ids
-    missed = KNOWN_SUPERNOVAE_SET - detected_ids
-    false_positives = detected_ids - KNOWN_SUPERNOVAE_SET
+    # ----------------------------------------------------------------
+    # Validation against known supernovae (with telescope check)
+    # ----------------------------------------------------------------
+    # Group detection types per object ID
+    detected_types = {}  # obj_id -> set of detection_types
+    for row in all_candidates:
+        obj_id = row[0]
+        det_type = row[3]
+        detected_types.setdefault(obj_id, set()).add(det_type)
 
-    print(f"\n--- Validation against {len(KNOWN_SUPERNOVAE_SET)} known supernovae ---")
-    print(f"Recovered: {len(recovered)}/{len(KNOWN_SUPERNOVAE_SET)} "
-          f"({len(recovered)/len(KNOWN_SUPERNOVAE_SET)*100:.1f}%)")
-    if recovered:
-        print(f"  IDs: {sorted(recovered)}")
-    print(f"Missed: {len(missed)}/{len(KNOWN_SUPERNOVAE_SET)}")
+    detected_ids = set(detected_types.keys())
+    known_ids = set(known_sn.keys())
+
+    # Map CSV telescope label -> expected detection_type tag
+    telescope_to_type = {"JWST": "JWST_SN", "HST": "HST_SN"}
+
+    recovered_correct = set()  # detected with the correct telescope
+    recovered_wrong = set()    # detected, but only with the wrong telescope
+    missed = set()
+    for oid, telescope in known_sn.items():
+        expected = telescope_to_type[telescope]
+        if oid in detected_types:
+            if expected in detected_types[oid]:
+                recovered_correct.add(oid)
+            else:
+                recovered_wrong.add(oid)
+        else:
+            missed.add(oid)
+
+    new_candidates = detected_ids - known_ids
+    n_known = len(known_ids)
+
+    print(f"\n--- Validation against {n_known} known supernovae "
+          f"(from {args.known_sn_csv}) ---")
+    print(f"Recovered (correct telescope): {len(recovered_correct)}/{n_known} "
+          f"({len(recovered_correct)/n_known*100:.1f}%)")
+    if recovered_correct:
+        print(f"  IDs: {sorted(recovered_correct)}")
+    if recovered_wrong:
+        print(f"Recovered but WRONG telescope: {len(recovered_wrong)}/{n_known}")
+        for oid in sorted(recovered_wrong):
+            expected = telescope_to_type[known_sn[oid]]
+            actual = sorted(detected_types[oid])
+            print(f"  {oid}: expected {expected}, got {actual}")
+    print(f"Missed: {len(missed)}/{n_known}")
     if missed:
         print(f"  IDs: {sorted(missed)}")
-    print(f"New candidates (not in known list): {len(false_positives)}")
+    print(f"New candidates (not in known list): {len(new_candidates)}")
 
 
 if __name__ == "__main__":

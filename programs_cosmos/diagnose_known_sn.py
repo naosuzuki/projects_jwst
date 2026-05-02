@@ -1,14 +1,17 @@
 """
-Diagnostic: visualize the 7 known supernovae (ID 1-53131) to understand
-what the CNN is actually seeing.
+Diagnostic: visualize the known supernovae in the verified ID range (1-53131)
+to understand what the CNN is actually seeing.
 
 Generates side-by-side images of HST, JWST1, JWST2 for each known SN,
 plus the difference images, so we can see what works and what doesn't.
+
+The list of known SN is loaded from data/sn_v03.csv (ID, TELESCOPE).
 
 Usage:
     python diagnose_known_sn.py
 """
 
+import csv
 import glob
 import os
 import re
@@ -19,12 +22,29 @@ import numpy as np
 
 IMAGE_SIZE = 256  # Large for visual inspection
 
-# 7 known SN in ID range 1-53131
-KNOWN_SN_RANGE1 = ["9748", "19931", "25141", "27350", "39020", "52864", "53669"]
+# Verified-by-visual-inspection ID range
+KNOWN_SN_RANGE_MAX = 53131
+
+# Default path to the ground-truth supernova catalog (relative to this script).
+DEFAULT_KNOWN_SN_CSV = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "sn_v03.csv"
+)
 
 HST_DIR = "/data/astrofs2_1/suzuki/data/HST/cosmosacs/original_png/"
 JWST_DIR = "/data/astrofs2_1/suzuki/data/JWST/cosmosweb/v0.8_png"
 OUTPUT_DIR = "diagnose_known_sn"
+
+
+def load_known_sn_in_range(csv_path, max_id):
+    """Load known SN IDs <= max_id from the catalog CSV (returns list)."""
+    ids = []
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            obj_id = (row.get("ID") or "").strip()
+            if obj_id.isdigit() and int(obj_id) <= max_id:
+                ids.append(obj_id)
+    return ids
 
 
 def parse_filename(filename):
@@ -74,13 +94,20 @@ def add_label(img, text, pos=(10, 25), color=(0, 255, 0)):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    KNOWN_SN_RANGE1 = load_known_sn_in_range(DEFAULT_KNOWN_SN_CSV, KNOWN_SN_RANGE_MAX)
+    known_sn_set = set(KNOWN_SN_RANGE1)
+    print(f"Loaded {len(KNOWN_SN_RANGE1)} known SN with ID <= "
+          f"{KNOWN_SN_RANGE_MAX} from {DEFAULT_KNOWN_SN_CSV}")
+
     print("Scanning files...")
     file_map = build_file_maps(HST_DIR, JWST_DIR)
 
     # Also pick some non-SN objects nearby for comparison
     non_sn_examples = []
     for obj_id in sorted(file_map.keys(), key=lambda x: int(x) if x.isdigit() else 0):
-        if obj_id not in KNOWN_SN_RANGE1 and obj_id.isdigit() and int(obj_id) <= 53131:
+        if (obj_id not in known_sn_set
+                and obj_id.isdigit()
+                and int(obj_id) <= KNOWN_SN_RANGE_MAX):
             files = file_map[obj_id]
             if "hst" in files and "jwst1" in files and "jwst2" in files:
                 non_sn_examples.append(obj_id)
@@ -194,7 +221,7 @@ def main():
         # Combine all rows
         panel = np.vstack([row1, row2, row3])
 
-        tag = "SN" if obj_id in KNOWN_SN_RANGE1 else "NEG"
+        tag = "SN" if obj_id in known_sn_set else "NEG"
         out_path = os.path.join(OUTPUT_DIR, f"{tag}_{obj_id}.png")
         cv2.imwrite(out_path, panel)
         print(f"    Saved: {out_path}")
