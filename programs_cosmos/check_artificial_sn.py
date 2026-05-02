@@ -5,11 +5,19 @@ Creates side-by-side images showing:
 - Original HST, JWST1, JWST2
 - Modified images with artificial SN injected
 
+If --profiles-csv is provided (the *_profiles.csv emitted by
+train_supernova_cnn.py), amp/sigma are sampled from the measured real-SN
+distribution instead of fixed uniform ranges.  Sigma is scaled from the
+trainer's 64x64 image size to this script's IMAGE_SIZE for display.
+
 Usage:
-    python check_artificial_sn.py --hst-dir <dir> --jwst-dir <dir> --num 10
+    python check_artificial_sn.py --num 10
+    python check_artificial_sn.py --num 10 \
+        --profiles-csv supernova_cnn_candidates_profiles.csv
 """
 
 import argparse
+import csv
 import glob
 import os
 import random
@@ -19,7 +27,72 @@ import cv2
 import numpy as np
 
 
-IMAGE_SIZE = 256  # Larger size for visual inspection
+IMAGE_SIZE = 256          # Display size for visual inspection
+TRAINER_IMAGE_SIZE = 64   # Image size train_supernova_cnn.py uses
+SIGMA_SCALE = IMAGE_SIZE / TRAINER_IMAGE_SIZE  # Scale measured sigma to display res
+
+
+def load_profiles_csv(path):
+    """Load amp/sigma profiles emitted by train_supernova_cnn.py.
+
+    Returns dict {"JWST": [...], "HST": [...]} with sigma values rescaled
+    from TRAINER_IMAGE_SIZE to IMAGE_SIZE for display.
+    """
+    profiles = {"JWST": [], "HST": []}
+    if not path or not os.path.exists(path):
+        return profiles
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            tel = (row.get("telescope") or "").strip().upper()
+            try:
+                amp_a = float(row["amp_a"])
+                sig_a = float(row["sigma_a"]) * SIGMA_SCALE
+            except (KeyError, ValueError):
+                continue
+            if tel == "JWST":
+                try:
+                    amp_b = float(row["amp_b"])
+                    sig_b = float(row["sigma_b"]) * SIGMA_SCALE
+                except (KeyError, ValueError):
+                    continue
+                profiles["JWST"].append({
+                    "amp1": amp_a, "sigma1": sig_a,
+                    "amp2": amp_b, "sigma2": sig_b,
+                })
+            elif tel == "HST":
+                profiles["HST"].append({"amp": amp_a, "sigma": sig_a})
+    return profiles
+
+
+def sample_jwst_params(profiles):
+    """Return (amp1, sigma1, amp2, sigma2) sampled from real or default ranges."""
+    jitter_amp = random.uniform(0.7, 1.3)
+    jitter_sig = random.uniform(0.85, 1.15)
+    if profiles and profiles.get("JWST"):
+        p = random.choice(profiles["JWST"])
+        amp1 = float(np.clip(p["amp1"] * jitter_amp, 0.05, 0.95))
+        amp2 = float(np.clip(p["amp2"] * jitter_amp, 0.05, 0.95))
+        sig1 = float(np.clip(p["sigma1"] * jitter_sig, 1.0, 20.0))
+        sig2 = float(np.clip(p["sigma2"] * jitter_sig, 1.0, 20.0))
+    else:
+        amp1 = random.uniform(0.3, 0.9)
+        amp2 = amp1 * random.uniform(0.7, 1.3)
+        sig1 = sig2 = random.uniform(2.0, 5.0)
+    return amp1, sig1, amp2, sig2
+
+
+def sample_hst_params(profiles):
+    """Return (amp, sigma) sampled from real or default ranges."""
+    jitter_amp = random.uniform(0.7, 1.3)
+    jitter_sig = random.uniform(0.85, 1.15)
+    if profiles and profiles.get("HST"):
+        p = random.choice(profiles["HST"])
+        amp = float(np.clip(p["amp"] * jitter_amp, 0.05, 0.95))
+        sig = float(np.clip(p["sigma"] * jitter_sig, 1.0, 20.0))
+    else:
+        amp = random.uniform(0.3, 0.9)
+        sig = random.uniform(2.0, 5.0)
+    return amp, sig
 
 
 def parse_filename(filename):
@@ -99,9 +172,22 @@ def main():
                         help="Number of examples to generate (default: 10)")
     parser.add_argument("--output-dir", default="artificial_sn_check",
                         help="Output directory (default: artificial_sn_check)")
+    parser.add_argument(
+        "--profiles-csv", default=None,
+        help="Optional CSV of measured real-SN amp/sigma "
+             "(supernova_cnn_candidates_profiles.csv from train_supernova_cnn.py). "
+             "Sigma is rescaled from 64-px training res to this script's display res."
+    )
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    profiles = load_profiles_csv(args.profiles_csv) if args.profiles_csv else None
+    if profiles:
+        print(f"Loaded profiles from {args.profiles_csv}: "
+              f"{len(profiles['JWST'])} JWST, {len(profiles['HST'])} HST")
+    else:
+        print("No profiles CSV provided -- using uniform amp/sigma ranges")
 
     print("Scanning files...")
     file_map = build_file_maps(args.hst_dir, args.jwst_dir)
@@ -131,12 +217,10 @@ def main():
         y = cy + random.randint(-max_offset, max_offset)
         x = max(3, min(w - 4, x))
         y = max(3, min(h - 4, y))
-        peak = random.uniform(0.3, 0.9)
-        sigma = random.uniform(2.0, 5.0)
+        amp1, sig1, amp2, sig2 = sample_jwst_params(profiles)
 
-        jwst1_sn = inject_supernova_at(jwst1_img, x, y, peak, sigma)
-        peak2 = peak * random.uniform(0.7, 1.3)
-        jwst2_sn = inject_supernova_at(jwst2_img, x, y, peak2, sigma)
+        jwst1_sn = inject_supernova_at(jwst1_img, x, y, amp1, sig1)
+        jwst2_sn = inject_supernova_at(jwst2_img, x, y, amp2, sig2)
 
         # Build comparison image: top = original, bottom = with SN
         row_orig = np.hstack([
@@ -167,17 +251,17 @@ def main():
         out_path = os.path.join(args.output_dir,
                                 f"{i+1:03d}_{obj_id}_jwst_sn.png")
         cv2.imwrite(out_path, jwst_panel)
-        print(f"  JWST SN: {out_path} (pos={x},{y} peak={peak:.2f} sigma={sigma:.1f})")
+        print(f"  JWST SN: {out_path} "
+              f"(pos={x},{y} amp1={amp1:.2f} sig1={sig1:.1f} amp2={amp2:.2f} sig2={sig2:.1f})")
 
         # --- HST supernova example (near center where host galaxy is) ---
         x2 = cx + random.randint(-max_offset, max_offset)
         y2 = cy + random.randint(-max_offset, max_offset)
         x2 = max(3, min(w - 4, x2))
         y2 = max(3, min(h - 4, y2))
-        peak_h = random.uniform(0.3, 0.9)
-        sigma_h = random.uniform(2.0, 5.0)
+        amp_h, sigma_h = sample_hst_params(profiles)
 
-        hst_sn = inject_supernova_at(hst_img, x2, y2, peak_h, sigma_h)
+        hst_sn = inject_supernova_at(hst_img, x2, y2, amp_h, sigma_h)
 
         row_orig2 = np.hstack([
             cv2.cvtColor(to_uint8(hst_img), cv2.COLOR_GRAY2BGR),
@@ -204,7 +288,8 @@ def main():
         out_path = os.path.join(args.output_dir,
                                 f"{i+1:03d}_{obj_id}_hst_sn.png")
         cv2.imwrite(out_path, hst_panel)
-        print(f"  HST SN:  {out_path} (pos={x2},{y2} peak={peak_h:.2f} sigma={sigma_h:.1f})")
+        print(f"  HST SN:  {out_path} "
+              f"(pos={x2},{y2} amp={amp_h:.2f} sigma={sigma_h:.1f})")
 
     print(f"\nDone! Check images in: {args.output_dir}/")
 
