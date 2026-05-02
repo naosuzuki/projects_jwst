@@ -134,6 +134,115 @@ def load_triplet(files, size=IMAGE_SIZE):
 
 
 # ============================================================
+# Real SN profile measurement
+# ============================================================
+
+def measure_sn_profile(image, search_radius_frac=0.25, fit_radius=4,
+                       min_amp=0.02):
+    """Measure background-subtracted peak amplitude and Gaussian sigma
+    of a point source near the centre of the image.
+
+    Args:
+        image: 2-D float array, normalised to [0, 1].
+        search_radius_frac: fraction of min(H, W) to search around centre.
+        fit_radius: pixel radius used for the second-moment sigma estimate.
+        min_amp: minimum amp (after background subtraction) to keep.
+
+    Returns:
+        (amp, sigma, x, y) or None if no clear point source found.
+    """
+    h, w = image.shape
+    cy, cx = h // 2, w // 2
+    radius = max(2, int(search_radius_frac * min(h, w)))
+
+    y0, y1 = max(0, cy - radius), min(h, cy + radius)
+    x0, x1 = max(0, cx - radius), min(w, cx + radius)
+    sub = image[y0:y1, x0:x1]
+    if sub.size == 0:
+        return None
+
+    py_rel, px_rel = np.unravel_index(np.argmax(sub), sub.shape)
+    py, px = py_rel + y0, px_rel + x0
+
+    bg = float(np.percentile(sub, 10))
+    amp = float(image[py, px]) - bg
+    if amp < min_amp:
+        return None
+
+    y_lo, y_hi = max(0, py - fit_radius), min(h, py + fit_radius + 1)
+    x_lo, x_hi = max(0, px - fit_radius), min(w, px + fit_radius + 1)
+    patch = np.clip(image[y_lo:y_hi, x_lo:x_hi] - bg, 0, None)
+    if patch.sum() < 1e-6:
+        return None
+
+    yy, xx = np.mgrid[y_lo:y_hi, x_lo:x_hi]
+    total = patch.sum()
+    cy_est = (yy * patch).sum() / total
+    cx_est = (xx * patch).sum() / total
+    sy2 = ((yy - cy_est)**2 * patch).sum() / total
+    sx2 = ((xx - cx_est)**2 * patch).sum() / total
+    sigma = float(np.sqrt(0.5 * (sx2 + sy2)))
+
+    if not (0.5 <= sigma <= 6.0):
+        return None
+    return amp, sigma, int(px), int(py)
+
+
+def measure_real_sn_profiles(known_sn, paired, size=None):
+    """Measure (amp, sigma) for each catalogued SN.
+
+    For JWST-labelled SN, measure both jwst1 and jwst2.
+    For HST-labelled SN, measure HST.
+
+    Returns:
+        dict {"JWST": [{id, amp1, sigma1, amp2, sigma2}, ...],
+              "HST":  [{id, amp,  sigma}, ...]}
+    """
+    if size is None:
+        size = IMAGE_SIZE
+    profiles = {"JWST": [], "HST": []}
+    for obj_id, telescope in known_sn.items():
+        if obj_id not in paired:
+            continue
+        triplet = load_triplet(paired[obj_id], size=size)
+        if triplet is None:
+            continue
+        hst, jwst1, jwst2 = triplet
+        if telescope == "JWST":
+            p1 = measure_sn_profile(jwst1)
+            p2 = measure_sn_profile(jwst2)
+            if p1 is None or p2 is None:
+                continue
+            profiles["JWST"].append({
+                "id": obj_id,
+                "amp1": p1[0], "sigma1": p1[1],
+                "amp2": p2[0], "sigma2": p2[1],
+            })
+        else:  # HST
+            p = measure_sn_profile(hst)
+            if p is None:
+                continue
+            profiles["HST"].append({
+                "id": obj_id, "amp": p[0], "sigma": p[1],
+            })
+    return profiles
+
+
+def save_profiles_csv(profiles, path):
+    """Save measured SN profiles to CSV for inspection."""
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "telescope", "amp_a", "sigma_a", "amp_b", "sigma_b"])
+        for p in profiles["JWST"]:
+            w.writerow([p["id"], "JWST",
+                        f"{p['amp1']:.4f}", f"{p['sigma1']:.3f}",
+                        f"{p['amp2']:.4f}", f"{p['sigma2']:.3f}"])
+        for p in profiles["HST"]:
+            w.writerow([p["id"], "HST",
+                        f"{p['amp']:.4f}", f"{p['sigma']:.3f}", "", ""])
+
+
+# ============================================================
 # Artificial supernova injection
 # ============================================================
 
@@ -155,25 +264,50 @@ def random_pos_near_center(size, max_frac=0.25):
     return x, y
 
 
-def inject_artificial_sn(triplet):
-    """Inject artificial SN into a triplet, return modified triplet.
+def inject_artificial_sn(triplet, profiles=None):
+    """Inject one artificial SN into a triplet and return the modified triplet.
 
-    50% chance JWST SN (in both JWST, not HST)
-    50% chance HST SN (in HST only)
+    If `profiles` is provided (output of measure_real_sn_profiles), the SN
+    amplitude and sigma are sampled from the empirical distribution of real
+    SN with a small jitter.  The fraction of JWST-vs-HST artificial SN is
+    weighted by how many real SN of each type were measured.
+
+    Otherwise falls back to the original uniform distribution.
     """
     hst, jwst1, jwst2 = triplet[0].copy(), triplet[1].copy(), triplet[2].copy()
     x, y = random_pos_near_center(IMAGE_SIZE)
-    peak = random.uniform(0.15, 0.8)
-    sigma = random.uniform(1.0, 3.0)
+    jitter_amp = random.uniform(0.7, 1.3)
+    jitter_sig = random.uniform(0.85, 1.15)
 
-    if random.random() > 0.5:
-        # JWST SN: in both JWST filters at same position
-        jwst1 = inject_supernova_at(jwst1, x, y, peak, sigma)
-        peak2 = peak * random.uniform(0.7, 1.3)
-        jwst2 = inject_supernova_at(jwst2, x, y, peak2, sigma)
+    # Choose JWST vs HST weighted by catalog size, default 50/50
+    if profiles is not None:
+        n_j, n_h = len(profiles.get("JWST", [])), len(profiles.get("HST", []))
+        inject_jwst = (random.random() < (n_j / (n_j + n_h))) if (n_j + n_h) else True
     else:
-        # HST SN: in HST only
-        hst = inject_supernova_at(hst, x, y, peak, sigma)
+        inject_jwst = random.random() > 0.5
+
+    if inject_jwst:
+        if profiles and profiles["JWST"]:
+            p = random.choice(profiles["JWST"])
+            amp1 = float(np.clip(p["amp1"]   * jitter_amp, 0.05, 0.95))
+            amp2 = float(np.clip(p["amp2"]   * jitter_amp, 0.05, 0.95))
+            sig1 = float(np.clip(p["sigma1"] * jitter_sig, 0.7, 5.0))
+            sig2 = float(np.clip(p["sigma2"] * jitter_sig, 0.7, 5.0))
+        else:
+            amp1 = random.uniform(0.15, 0.8)
+            amp2 = amp1 * random.uniform(0.7, 1.3)
+            sig1 = sig2 = random.uniform(1.0, 3.0)
+        jwst1 = inject_supernova_at(jwst1, x, y, amp1, sig1)
+        jwst2 = inject_supernova_at(jwst2, x, y, amp2, sig2)
+    else:
+        if profiles and profiles["HST"]:
+            p = random.choice(profiles["HST"])
+            amp = float(np.clip(p["amp"]   * jitter_amp, 0.05, 0.95))
+            sig = float(np.clip(p["sigma"] * jitter_sig, 0.7, 5.0))
+        else:
+            amp = random.uniform(0.15, 0.8)
+            sig = random.uniform(1.0, 3.0)
+        hst = inject_supernova_at(hst, x, y, amp, sig)
 
     return np.stack([hst, jwst1, jwst2], axis=0)
 
@@ -227,12 +361,18 @@ class VerifiedDataset(Dataset):
 
 
 class ArtificialSNDataset(Dataset):
-    """Generate artificial SN by injecting into non-SN objects."""
+    """Generate artificial SN by injecting into non-SN objects.
 
-    def __init__(self, non_sn_files, num_samples=5000, augment=True):
+    If `profiles` (from measure_real_sn_profiles) is provided, the injected
+    SN are sampled from the empirical real-SN amp/sigma distribution.
+    """
+
+    def __init__(self, non_sn_files, num_samples=5000, augment=True,
+                 profiles=None):
         self.non_sn_files = non_sn_files
         self.num_samples = num_samples
         self.augment = augment
+        self.profiles = profiles
 
     def __len__(self):
         return self.num_samples
@@ -242,7 +382,7 @@ class ArtificialSNDataset(Dataset):
         triplet = load_triplet(files)
         if triplet is None:
             return torch.zeros(NUM_CHANNELS, IMAGE_SIZE, IMAGE_SIZE), torch.tensor(0.0)
-        triplet = inject_artificial_sn(triplet)
+        triplet = inject_artificial_sn(triplet, profiles=self.profiles)
         if self.augment:
             triplet = augment_triplet(triplet)
         return torch.tensor(triplet, dtype=torch.float32), torch.tensor(1.0, dtype=torch.float32)
@@ -349,6 +489,11 @@ def main():
         "--known-sn-csv", default=DEFAULT_KNOWN_SN_CSV,
         help=f"CSV of confirmed supernovae (default: {DEFAULT_KNOWN_SN_CSV})"
     )
+    parser.add_argument(
+        "--skip-train", action="store_true",
+        help="Skip training; load existing weights from --model-path and "
+             "go straight to inference"
+    )
     args = parser.parse_args()
 
     # Load ground-truth catalog and derive id sets
@@ -414,16 +559,43 @@ def main():
     print(f"  + {len(known_sn_objects) - len(verified_sn_ids)} additional known SN")
     print(f"  Total positives: {len(verified_pos_files)}")
 
+    # Measure real SN profiles to drive realistic artificial SN injection
+    print("\n--- Measuring real SN profiles for artificial SN injection ---")
+    profiles = measure_real_sn_profiles(known_sn, paired, size=IMAGE_SIZE)
+    n_jwst_cat = sum(1 for v in known_sn.values() if v == "JWST")
+    n_hst_cat = sum(1 for v in known_sn.values() if v == "HST")
+    print(f"  JWST profiles measured: {len(profiles['JWST'])}/{n_jwst_cat}")
+    print(f"  HST  profiles measured: {len(profiles['HST'])}/{n_hst_cat}")
+    if profiles["JWST"]:
+        amps = [p["amp1"] for p in profiles["JWST"]]
+        sigs = [p["sigma1"] for p in profiles["JWST"]]
+        print(f"  JWST amp1: median={np.median(amps):.3f} "
+              f"range=[{min(amps):.3f}, {max(amps):.3f}]")
+        print(f"  JWST sigma1: median={np.median(sigs):.2f} "
+              f"range=[{min(sigs):.2f}, {max(sigs):.2f}]")
+    if profiles["HST"]:
+        amps = [p["amp"] for p in profiles["HST"]]
+        sigs = [p["sigma"] for p in profiles["HST"]]
+        print(f"  HST  amp: median={np.median(amps):.3f} "
+              f"range=[{min(amps):.3f}, {max(amps):.3f}]")
+        print(f"  HST  sigma: median={np.median(sigs):.2f} "
+              f"range=[{min(sigs):.2f}, {max(sigs):.2f}]")
+    profiles_csv = args.output_csv.replace(".csv", "_profiles.csv")
+    save_profiles_csv(profiles, profiles_csv)
+    print(f"  Profiles saved to {profiles_csv}")
+
     # Create datasets
     verified_dataset = VerifiedDataset(
         verified_pos_files, verified_neg_files,
         oversample_pos=500, augment=True)
 
-    # Artificial SN for additional variety
+    # Artificial SN for additional variety, sampled from real SN profile distribution
     art_dataset = ArtificialSNDataset(
         verified_neg_files[:5000],
-        num_samples=args.num_artificial, augment=True)
-    print(f"Artificial SN samples: {args.num_artificial}")
+        num_samples=args.num_artificial, augment=True,
+        profiles=profiles)
+    print(f"Artificial SN samples: {args.num_artificial} "
+          f"(profile-driven: {bool(profiles['JWST'] or profiles['HST'])})")
 
     train_dataset = torch.utils.data.ConcatDataset([verified_dataset, art_dataset])
     train_loader = DataLoader(
@@ -432,53 +604,62 @@ def main():
     print(f"Total training samples: {len(train_dataset)}")
 
     # ==================================================================
-    # STEP 3: Train CNN
+    # STEP 3: Train CNN (skipped if --skip-train)
     # ==================================================================
     print("\n" + "="*60)
-    print("STEP 3: Training CNN")
+    print("STEP 3: Training CNN" + (" (SKIPPED)" if args.skip_train else ""))
     print("="*60)
 
     model = SupernovaCNN().to(device)
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
-
-    best_recovery = 0
-    best_epoch = 0
 
     # Prepare known SN files for validation
     known_files_list = [known_sn_objects[oid] for oid in sorted(known_sn_objects.keys())]
     known_ids_list = sorted(known_sn_objects.keys())
 
-    for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device)
+    if args.skip_train:
+        if not os.path.exists(args.model_path):
+            sys.exit(f"--skip-train but model not found at {args.model_path}")
+        print(f"Loading existing weights from {args.model_path}")
+        model.load_state_dict(
+            torch.load(args.model_path, weights_only=True, map_location=device))
+    else:
+        criterion = nn.BCEWithLogitsLoss()
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, patience=5, factor=0.5)
 
-        # Check known SN recovery every 5 epochs
-        if epoch % 5 == 0 or epoch == args.epochs or epoch == 1:
-            probs = predict_batch(model, known_files_list, device)
-            recovered = sum(1 for p in probs if p >= 0.5)
+        best_recovery = 0
+        best_epoch = 0
 
-            # Show each known SN probability
-            if epoch % 10 == 0 or epoch == args.epochs:
-                for oid, p in zip(known_ids_list, probs):
-                    tag = "OK" if p >= 0.5 else "MISS"
-                    print(f"    {oid}: {p:.4f} [{tag}]")
+        for epoch in range(1, args.epochs + 1):
+            train_loss, train_acc = train_epoch(
+                model, train_loader, criterion, optimizer, device)
 
-            print(f"Epoch {epoch:3d}/{args.epochs} | "
-                  f"loss: {train_loss:.4f} acc: {train_acc:.3f} | "
-                  f"Known SN: {recovered}/{len(known_ids_list)}")
+            # Check known SN recovery every 5 epochs
+            if epoch % 5 == 0 or epoch == args.epochs or epoch == 1:
+                probs = predict_batch(model, known_files_list, device)
+                recovered = sum(1 for p in probs if p >= 0.5)
 
-            if recovered >= best_recovery:
-                best_recovery = recovered
-                best_epoch = epoch
-                torch.save(model.state_dict(), args.model_path)
-            scheduler.step(train_loss)
-        else:
-            print(f"Epoch {epoch:3d}/{args.epochs} | "
-                  f"loss: {train_loss:.4f} acc: {train_acc:.3f}")
+                # Show each known SN probability
+                if epoch % 10 == 0 or epoch == args.epochs:
+                    for oid, p in zip(known_ids_list, probs):
+                        tag = "OK" if p >= 0.5 else "MISS"
+                        print(f"    {oid}: {p:.4f} [{tag}]")
 
-    print(f"\nBest: {best_recovery}/{len(known_ids_list)} at epoch {best_epoch}")
+                print(f"Epoch {epoch:3d}/{args.epochs} | "
+                      f"loss: {train_loss:.4f} acc: {train_acc:.3f} | "
+                      f"Known SN: {recovered}/{len(known_ids_list)}")
+
+                if recovered >= best_recovery:
+                    best_recovery = recovered
+                    best_epoch = epoch
+                    torch.save(model.state_dict(), args.model_path)
+                scheduler.step(train_loss)
+            else:
+                print(f"Epoch {epoch:3d}/{args.epochs} | "
+                      f"loss: {train_loss:.4f} acc: {train_acc:.3f}")
+
+        print(f"\nBest: {best_recovery}/{len(known_ids_list)} at epoch {best_epoch}")
 
     # ==================================================================
     # STEP 4: Validate — set threshold to recover all known SN
